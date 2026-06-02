@@ -1,2 +1,457 @@
-<h1>Hello!</h1>
-<h2>What is going on bro</h2>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hand Finger Tracker</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0f;
+      color: #e8e8e8;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 40px;
+      gap: 24px;
+    }
+
+    header {
+      text-align: center;
+    }
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+    header p {
+      margin-top: 6px;
+      font-size: 0.88rem;
+      color: #666;
+    }
+
+    /* ── camera + canvas overlay ── */
+    .video-wrap {
+      position: relative;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08),
+                  0 8px 48px rgba(0,0,0,0.7),
+                  0 0 60px rgba(56,189,248,0.12);
+      background: #111;
+      /* clamp so it doesn't go off-screen */
+      max-width: min(640px, 100vw - 32px);
+      width: 100%;
+      aspect-ratio: 4/3;
+    }
+    video, canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      /* mirror for natural selfie view */
+      transform: scaleX(-1);
+    }
+    video { object-fit: cover; }
+    canvas { background: transparent; }
+
+    /* ── finger count cards ── */
+    .counts {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 18px 36px;
+      text-align: center;
+      min-width: 120px;
+      transition: border-color 0.2s;
+    }
+    .card.active { border-color: rgba(56,189,248,0.4); }
+    .card label {
+      display: block;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #555;
+      margin-bottom: 8px;
+    }
+    .card .num {
+      font-size: 4rem;
+      font-weight: 800;
+      line-height: 1;
+      transition: color 0.2s;
+    }
+    #num-left  { color: #38bdf8; }
+    #num-right { color: #f472b6; }
+    #num-total { color: #a78bfa; }
+
+    /* ── finger display ── */
+    .fingers-display {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .hand-fingers {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .hand-fingers h3 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #555;
+    }
+    .finger-dots {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .finger-dot {
+      width: 14px;
+      border-radius: 99px;
+      background: rgba(255,255,255,0.08);
+      transition: background 0.15s, height 0.15s;
+    }
+    /* thumb is shorter */
+    .finger-dot:nth-child(1) { height: 32px; }
+    .finger-dot:nth-child(2) { height: 52px; }
+    .finger-dot:nth-child(3) { height: 56px; }
+    .finger-dot:nth-child(4) { height: 48px; }
+    .finger-dot:nth-child(5) { height: 38px; }
+    .finger-dot.up { background: #38bdf8; }
+    .hand-fingers.right .finger-dot.up { background: #f472b6; }
+
+    /* ── status bar ── */
+    #status {
+      font-size: 0.82rem;
+      color: #555;
+      text-align: center;
+    }
+    #status.ok { color: #4ade80; }
+    #status.warn { color: #facc15; }
+
+    /* ── loading overlay ── */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: #0d0d0f;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 999;
+    }
+    #loading p { color: #888; font-size: 0.9rem; }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 3px solid rgba(56,189,248,0.2);
+      border-top-color: #38bdf8;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <p id="loading-msg">Loading MediaPipe…</p>
+  </div>
+
+  <header>
+    <h1>Hand Finger Tracker</h1>
+    <p>Hold your hands up to the camera — fingers are counted in real time.</p>
+  </header>
+
+  <div class="video-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <!-- finger visualisation -->
+  <div class="fingers-display">
+    <div class="hand-fingers left" id="dots-left">
+      <h3>Left hand</h3>
+      <div class="finger-dots">
+        <div class="finger-dot" data-i="0"></div>
+        <div class="finger-dot" data-i="1"></div>
+        <div class="finger-dot" data-i="2"></div>
+        <div class="finger-dot" data-i="3"></div>
+        <div class="finger-dot" data-i="4"></div>
+      </div>
+    </div>
+    <div class="hand-fingers right" id="dots-right">
+      <h3>Right hand</h3>
+      <div class="finger-dots">
+        <div class="finger-dot" data-i="0"></div>
+        <div class="finger-dot" data-i="1"></div>
+        <div class="finger-dot" data-i="2"></div>
+        <div class="finger-dot" data-i="3"></div>
+        <div class="finger-dot" data-i="4"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- numeric counts -->
+  <div class="counts">
+    <div class="card" id="card-left">
+      <label>Left hand</label>
+      <div class="num" id="num-left">–</div>
+    </div>
+    <div class="card" id="card-total">
+      <label>Total</label>
+      <div class="num" id="num-total">0</div>
+    </div>
+    <div class="card" id="card-right">
+      <label>Right hand</label>
+      <div class="num" id="num-right">–</div>
+    </div>
+  </div>
+
+  <p id="status" class="warn">Initialising camera…</p>
+
+  <!-- MediaPipe Hands via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+
+  <script>
+    // ── DOM refs ──────────────────────────────────────────────────────────────
+    const video      = document.getElementById('video');
+    const canvas     = document.getElementById('canvas');
+    const ctx        = canvas.getContext('2d');
+    const loadingEl  = document.getElementById('loading');
+    const loadingMsg = document.getElementById('loading-msg');
+    const statusEl   = document.getElementById('status');
+    const numLeft    = document.getElementById('num-left');
+    const numRight   = document.getElementById('num-right');
+    const numTotal   = document.getElementById('num-total');
+    const cardLeft   = document.getElementById('card-left');
+    const cardRight  = document.getElementById('card-right');
+    const dotsLeft   = document.querySelectorAll('#dots-left .finger-dot');
+    const dotsRight  = document.querySelectorAll('#dots-right .finger-dot');
+
+    // ── Landmark indices ──────────────────────────────────────────────────────
+    //  0 = wrist
+    //  1-4   = thumb   (CMC → TIP)
+    //  5-8   = index   (MCP → TIP)
+    //  9-12  = middle
+    //  13-16 = ring
+    //  17-20 = pinky
+    const TIPS = [4, 8, 12, 16, 20];  // thumb + 4 fingers
+    const PIPS = [3, 6, 10, 14, 18];  // one joint below each tip (thumb IP, others PIP)
+
+    // Hand skeleton connections for drawing
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],
+      [0,17],
+    ];
+
+    // ── Finger counting ───────────────────────────────────────────────────────
+
+    // Determine anatomical handedness from landmark geometry, not MediaPipe's label.
+    // Cross product of (wrist→thumbCMC) × (wrist→pinkyMCP):
+    //   positive → person's right hand (thumb is to the anatomical-left of pinky in raw frame)
+    //   negative → person's left hand
+    // This is stable even when the hand rotates in place.
+    function crossSign(lm) {
+      const v1x = lm[1].x - lm[0].x, v1y = lm[1].y - lm[0].y;
+      const v2x = lm[17].x - lm[0].x, v2y = lm[17].y - lm[0].y;
+      return v1x * v2y - v1y * v2x;
+    }
+
+    // Returns an array of 5 booleans (thumb … pinky), true = finger up.
+    function getFingerStates(lm) {
+      const states = [false, false, false, false, false];
+
+      // Thumb: use anatomical chirality to pick the correct x-axis comparison.
+      // Right hand in raw camera coords: thumb tip is further LEFT (smaller x) when extended.
+      // Left  hand in raw camera coords: thumb tip is further RIGHT (larger x) when extended.
+      // If the cross product is near zero (hand nearly edge-on), fall back to y comparison.
+      const cs = crossSign(lm);
+      if (Math.abs(cs) < 0.02) {
+        states[0] = lm[4].y < lm[3].y;  // thumb above IP joint
+      } else if (cs > 0) {
+        states[0] = lm[4].x < lm[3].x;  // right hand
+      } else {
+        states[0] = lm[4].x > lm[3].x;  // left hand
+      }
+
+      // Fingers (index → pinky): tip y < pip y  →  finger is raised
+      for (let i = 1; i <= 4; i++) {
+        states[i] = lm[TIPS[i]].y < lm[PIPS[i]].y;
+      }
+
+      return states;
+    }
+
+    // ── Canvas drawing ────────────────────────────────────────────────────────
+    const COLORS = {
+      Left:  { line: '#38bdf8', dot: '#0ea5e9', tip: '#7dd3fc' },
+      Right: { line: '#f472b6', dot: '#ec4899', tip: '#fbcfe8' },
+    };
+
+    function px(lm) {
+      return [lm.x * canvas.width, lm.y * canvas.height];
+    }
+
+    function drawHand(lm, label) {
+      const c = COLORS[label] || COLORS.Left;
+
+      // Connections
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = c.line + 'cc';
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(...px(lm[a]));
+        ctx.lineTo(...px(lm[b]));
+        ctx.stroke();
+      }
+
+      // Joints
+      for (let i = 0; i < lm.length; i++) {
+        const isTip = TIPS.includes(i);
+        const [x, y] = px(lm[i]);
+        ctx.beginPath();
+        ctx.arc(x, y, isTip ? 7 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = isTip ? c.tip : c.dot;
+        ctx.fill();
+        ctx.strokeStyle = '#000a';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    // ── Update UI ─────────────────────────────────────────────────────────────
+    function updateDots(dotEls, states) {
+      dotEls.forEach((el, i) => {
+        el.classList.toggle('up', !!states[i]);
+      });
+    }
+
+    // ── MediaPipe result handler ──────────────────────────────────────────────
+    const EMPTY = [false, false, false, false, false];
+    let lastSeen = 0;
+
+    function onResults(results) {
+      canvas.width  = video.videoWidth  || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const hands = results.multiHandLandmarks || [];
+
+      updateDots(dotsLeft,  EMPTY);
+      updateDots(dotsRight, EMPTY);
+
+      let leftData = null, rightData = null;
+
+      for (const lm of hands) {
+        // Assign left/right purely from the wrist's position in the mirrored display.
+        // mirrored_x = 1 - raw_x  →  > 0.5 means the hand is on the right of the
+        // mirror, which is the user's right hand.  This never flips during rotation.
+        const mirroredWristX = 1 - lm[0].x;
+        const isRight = mirroredWristX > 0.5;
+
+        const fingerStates = getFingerStates(lm);
+        const count = fingerStates.filter(Boolean).length;
+
+        drawHand(lm, isRight ? 'Right' : 'Left');
+
+        if (isRight) {
+          rightData = { fingerStates, count };
+        } else {
+          leftData  = { fingerStates, count };
+        }
+      }
+
+      if (leftData)  updateDots(dotsLeft,  leftData.fingerStates);
+      if (rightData) updateDots(dotsRight, rightData.fingerStates);
+
+      numLeft.textContent  = leftData  ? leftData.count  : '–';
+      numRight.textContent = rightData ? rightData.count : '–';
+      numTotal.textContent = (leftData?.count ?? 0) + (rightData?.count ?? 0);
+
+      cardLeft.classList.toggle('active',  !!leftData);
+      cardRight.classList.toggle('active', !!rightData);
+
+      if (hands.length > 0) {
+        lastSeen = Date.now();
+        statusEl.className = 'ok';
+        statusEl.textContent = `Tracking ${hands.length} hand${hands.length > 1 ? 's' : ''}`;
+      } else {
+        const elapsed = Date.now() - lastSeen;
+        statusEl.className = 'warn';
+        statusEl.textContent = elapsed < 1500
+          ? 'Tracking lost…'
+          : 'No hands detected — show your hand to the camera';
+      }
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    async function init() {
+      try {
+        loadingMsg.textContent = 'Loading MediaPipe model…';
+
+        const hands = new Hands({
+          locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
+        });
+
+        hands.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.75,
+          minTrackingConfidence: 0.6,
+        });
+
+        hands.onResults(onResults);
+
+        loadingMsg.textContent = 'Starting camera…';
+
+        const camera = new Camera(video, {
+          onFrame: async () => {
+            await hands.send({ image: video });
+          },
+          width: 640,
+          height: 480,
+        });
+
+        await camera.start();
+        loadingEl.style.display = 'none';
+        statusEl.className = 'ok';
+        statusEl.textContent = 'Camera active — show your hands!';
+      } catch (err) {
+        loadingEl.style.display = 'none';
+        statusEl.className = '';
+        statusEl.textContent = `Error: ${err.message}`;
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
+
