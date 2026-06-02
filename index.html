@@ -137,6 +137,64 @@
     .finger-dot.up { background: #38bdf8; }
     .hand-fingers.right .finger-dot.up { background: #f472b6; }
 
+    /* ── face expression section ── */
+    .face-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .face-section h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #444;
+      margin-bottom: 4px;
+    }
+    .face-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: stretch;
+    }
+    .face-card { min-width: 150px; }
+    .face-expr {
+      font-size: 2.8rem;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.5px;
+      transition: color 0.25s;
+    }
+    .face-details {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 14px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 150px;
+    }
+    .face-metric {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 28px;
+    }
+    .fm-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #555;
+    }
+    .fm-val {
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: color 0.2s;
+      color: #94a3b8;
+    }
+
     /* ── status bar ── */
     #status {
       font-size: 0.82rem;
@@ -227,12 +285,38 @@
     </div>
   </div>
 
+  <!-- face expression display -->
+  <div class="face-section" id="face-section" style="display:none">
+    <h2>Face Expression</h2>
+    <div class="face-row">
+      <div class="card face-card" id="card-face">
+        <label>Expression</label>
+        <div class="face-expr" id="face-expr">Neutral</div>
+      </div>
+      <div class="face-details">
+        <div class="face-metric">
+          <span class="fm-label">Eyes</span>
+          <span class="fm-val" id="face-eyes">—</span>
+        </div>
+        <div class="face-metric">
+          <span class="fm-label">Mouth</span>
+          <span class="fm-val" id="face-mouth">—</span>
+        </div>
+        <div class="face-metric">
+          <span class="fm-label">Brows</span>
+          <span class="fm-val" id="face-brows">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <p id="status" class="warn">Initialising camera…</p>
 
   <!-- MediaPipe Hands via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
 
   <script>
     // ── DOM refs ──────────────────────────────────────────────────────────────
@@ -249,6 +333,12 @@
     const cardRight  = document.getElementById('card-right');
     const dotsLeft   = document.querySelectorAll('#dots-left .finger-dot');
     const dotsRight  = document.querySelectorAll('#dots-right .finger-dot');
+    const faceSectionEl = document.getElementById('face-section');
+    const faceExprEl    = document.getElementById('face-expr');
+    const faceEyesEl    = document.getElementById('face-eyes');
+    const faceMouthEl   = document.getElementById('face-mouth');
+    const faceBrowsEl   = document.getElementById('face-brows');
+    const cardFaceEl    = document.getElementById('card-face');
 
     // ── Landmark indices ──────────────────────────────────────────────────────
     //  0 = wrist
@@ -366,6 +456,105 @@
       });
     }
 
+    // ── Face Mesh constants & helpers ────────────────────────────────────────
+
+    // Landmark indices used for expression analysis
+    const FL_EYE = { top: 159, bot: 145, lt: 33,  rt: 133 };  // left eye
+    const FR_EYE = { top: 386, bot: 374, lt: 362, rt: 263 };  // right eye
+    const F_MO   = { top:  13, bot:  14, lt:  61, rt: 291 };  // mouth
+    const F_BL   = 55;   // left inner brow
+    const F_BR   = 285;  // right inner brow
+
+    // Closed outline paths drawn on the canvas (eyes, lips, brows)
+    const F_EYE_L  = [33,246,161,160,159,158,157,173,133,155,154,153,145,144,163,7,33];
+    const F_EYE_R  = [263,466,388,387,386,385,384,398,362,382,381,380,374,373,390,249,263];
+    const F_LIPS   = [61,185,40,39,37,0,267,269,270,409,291,375,321,405,314,17,84,181,91,146,61];
+    const F_BROW_L = [46,53,52,65,55];
+    const F_BROW_R = [276,283,282,295,285];
+
+    // Thresholds (geometry-based, scale-invariant via face-height normalisation)
+    const EAR_BLINK   = 0.17;   // eye aspect ratio below this → blink
+    const MAR_OPEN    = 0.20;   // mouth aspect ratio above this → open
+    const SMILE_MIN   = 0.020;  // corner-above-top-lip / faceH → happy
+    const BROW_RAISED = 0.105;  // brow-above-eye-top  / faceH → raised
+
+    function fd(a, b) { return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2); }
+
+    function earOf(lm, e) {
+      return fd(lm[e.top], lm[e.bot]) / (fd(lm[e.lt], lm[e.rt]) || 1e-4);
+    }
+
+    function analyseExpression(lm) {
+      const faceH      = fd(lm[10], lm[152]) || 0.01;  // forehead → chin
+      const earAvg     = (earOf(lm, FL_EYE) + earOf(lm, FR_EYE)) / 2;
+      const mar        = fd(lm[F_MO.top], lm[F_MO.bot]) / (fd(lm[F_MO.lt], lm[F_MO.rt]) || 1e-4);
+      // Smile: top-lip center y − average corner y, normalised; positive when corners rise.
+      const smileScore = (lm[F_MO.top].y - (lm[F_MO.lt].y + lm[F_MO.rt].y) / 2) / faceH;
+      // Brow raise: eye-top y − inner-brow y, normalised; larger when brows lift.
+      const browScore  = ((lm[FL_EYE.top].y - lm[F_BL].y) + (lm[FR_EYE.top].y - lm[F_BR].y)) / (2 * faceH);
+
+      const eyesClosed = earAvg    < EAR_BLINK;
+      const mouthOpen  = mar       > MAR_OPEN;
+      const smiling    = smileScore > SMILE_MIN;
+      const browsUp    = browScore  > BROW_RAISED;
+
+      let label, color;
+      if      (eyesClosed)           { label = 'Blink';     color = '#60a5fa'; }
+      else if (browsUp && mouthOpen) { label = 'Surprised'; color = '#f472b6'; }
+      else if (smiling)              { label = 'Happy';     color = '#4ade80'; }
+      else                           { label = 'Neutral';   color = '#94a3b8'; }
+
+      return {
+        label, color,
+        eyes:  eyesClosed ? 'Closed' : 'Open',
+        mouth: mouthOpen  ? 'Open'   : 'Closed',
+        brows: browsUp    ? 'Raised' : 'Normal',
+      };
+    }
+
+    function drawFace(lm) {
+      function fp(i) { return [lm[i].x * canvas.width, lm[i].y * canvas.height]; }
+      function tracePath(pts) {
+        ctx.beginPath();
+        ctx.moveTo(...fp(pts[0]));
+        for (let k = 1; k < pts.length; k++) ctx.lineTo(...fp(pts[k]));
+        ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(251,191,36,0.65)';
+      ctx.lineWidth = 1.2;
+      tracePath(F_EYE_L);
+      tracePath(F_EYE_R);
+      tracePath(F_LIPS);
+      tracePath(F_BROW_L);
+      tracePath(F_BROW_R);
+    }
+
+    // ── Face result handler ───────────────────────────────────────────────────
+    let lastFaceSeen = 0;
+
+    function onFaceResults(faceResults) {
+      const faces = faceResults.multiFaceLandmarks || [];
+      if (faces.length > 0) {
+        lastFaceSeen = Date.now();
+        const lm   = faces[0];
+        drawFace(lm);
+        const info = analyseExpression(lm);
+        faceSectionEl.style.display  = '';
+        faceExprEl.textContent       = info.label;
+        faceExprEl.style.color       = info.color;
+        faceEyesEl.textContent       = info.eyes;
+        faceEyesEl.style.color       = info.color;
+        faceMouthEl.textContent      = info.mouth;
+        faceMouthEl.style.color      = info.color;
+        faceBrowsEl.textContent      = info.brows;
+        faceBrowsEl.style.color      = info.color;
+        cardFaceEl.classList.add('active');
+      } else if (Date.now() - lastFaceSeen > 2000) {
+        faceSectionEl.style.display = 'none';
+        cardFaceEl.classList.remove('active');
+      }
+    }
+
     // ── MediaPipe result handler ──────────────────────────────────────────────
     const EMPTY = [false, false, false, false, false];
     let lastSeen = 0;
@@ -431,26 +620,36 @@
     // ── Init ──────────────────────────────────────────────────────────────────
     async function init() {
       try {
-        loadingMsg.textContent = 'Loading MediaPipe model…';
+        loadingMsg.textContent = 'Loading MediaPipe models…';
 
-        const hands = new Hands({
+        const handsModel = new Hands({
           locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
         });
-
-        hands.setOptions({
+        handsModel.setOptions({
           maxNumHands: 2,
           modelComplexity: 1,
           minDetectionConfidence: 0.75,
           minTrackingConfidence: 0.6,
         });
+        handsModel.onResults(onResults);
 
-        hands.onResults(onResults);
+        const faceModel = new FaceMesh({
+          locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
+        });
+        faceModel.setOptions({
+          maxNumFaces: 1,
+          refineLandmarks: false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        faceModel.onResults(onFaceResults);
 
         loadingMsg.textContent = 'Starting camera…';
 
         const camera = new Camera(video, {
           onFrame: async () => {
-            await hands.send({ image: video });
+            await handsModel.send({ image: video });
+            await faceModel.send({ image: video });
           },
           width: 640,
           height: 480,
