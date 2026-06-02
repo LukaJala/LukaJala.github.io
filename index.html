@@ -137,6 +137,30 @@
     .finger-dot.up { background: #38bdf8; }
     .hand-fingers.right .finger-dot.up { background: #f472b6; }
 
+    /* ── ASL alphabet ── */
+    .asl-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .asl-section h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #444;
+    }
+    .asl-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+    .asl-letter {
+      font-size: 4.5rem;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -2px;
+      transition: color 0.15s;
+    }
+    #asl-letter-left  { color: #38bdf8; }
+    #asl-letter-right { color: #f472b6; }
+
     /* ── status bar ── */
     #status {
       font-size: 0.82rem;
@@ -227,6 +251,21 @@
     </div>
   </div>
 
+  <!-- ASL fingerspelling -->
+  <div class="asl-section" id="asl-section" style="display:none">
+    <h2>ASL Alphabet</h2>
+    <div class="asl-row">
+      <div class="card" id="asl-card-left">
+        <label>Left hand</label>
+        <div class="asl-letter" id="asl-letter-left">—</div>
+      </div>
+      <div class="card" id="asl-card-right">
+        <label>Right hand</label>
+        <div class="asl-letter" id="asl-letter-right">—</div>
+      </div>
+    </div>
+  </div>
+
   <p id="status" class="warn">Initialising camera…</p>
 
   <!-- MediaPipe Hands via CDN -->
@@ -246,8 +285,13 @@
     const numTotal   = document.getElementById('num-total');
     const cardLeft   = document.getElementById('card-left');
     const cardRight  = document.getElementById('card-right');
-    const dotsLeft   = document.querySelectorAll('#dots-left .finger-dot');
-    const dotsRight  = document.querySelectorAll('#dots-right .finger-dot');
+    const dotsLeft      = document.querySelectorAll('#dots-left .finger-dot');
+    const dotsRight     = document.querySelectorAll('#dots-right .finger-dot');
+    const aslSectionEl  = document.getElementById('asl-section');
+    const aslLetterLeft = document.getElementById('asl-letter-left');
+    const aslLetterRight= document.getElementById('asl-letter-right');
+    const aslCardLeft   = document.getElementById('asl-card-left');
+    const aslCardRight  = document.getElementById('asl-card-right');
 
     // ── Landmark indices ──────────────────────────────────────────────────────
     //  0 = wrist
@@ -365,6 +409,66 @@
       });
     }
 
+    // ── ASL alphabet classifier ───────────────────────────────────────────────
+    // Identifies ~18 static ASL fingerspelling letters from hand landmarks.
+    // Letters requiring motion (J, Z) or indistinguishable without depth
+    // (C, H, M, N, P, Q) return null.
+    function classifyASL(lm) {
+      const [th, ix, mx, rx, pk] = getFingerStates(lm);
+
+      // Distances normalised by palm height (wrist → middle MCP)
+      const pH = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 0.01;
+      const dn = (a, b) => Math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y) / pH;
+
+      // Is thumb tip close to each fingertip?
+      const tI  = dn(4, 8)  < 0.45;
+      const tM  = dn(4, 12) < 0.45;
+      const tR  = dn(4, 16) < 0.45;
+      const tPk = dn(4, 20) < 0.45;
+
+      // How far apart are the index and middle fingertips?
+      const imSep = dn(8, 12);
+
+      // Index bent/hooked: not extended but tip is close to its own MCP
+      const ixHook = !ix && dn(8, 5) < 0.85;
+
+      // Unique extension patterns ─────────────────────────────────────────────
+      if (!th &&  ix &&  mx &&  rx &&  pk) return 'B'; // all 4 fingers up
+      if ( th && !ix && !mx && !rx &&  pk) return 'Y'; // thumb + pinky (shaka)
+      if ( th &&  ix && !mx && !rx && !pk) return 'L'; // index up + thumb out
+      if (!th && !ix && !mx && !rx &&  pk) return 'I'; // pinky only
+      if (!th &&  ix &&  mx &&  rx && !pk) return 'W'; // 3 fingers up
+
+      // F: middle+ring+pinky up, index curled to touch thumb
+      if (!ix && mx && rx && pk && tI) return 'F';
+
+      // Index + middle ── disambiguate by thumb contact and spread ───────────
+      if (ix && mx && !rx && !pk) {
+        if (tM)           return 'K'; // thumb between fingers
+        if (imSep < 0.18) return 'R'; // fingers crossed/overlapping
+        if (imSep < 0.38) return 'U'; // fingers parallel and close
+        return 'V';                    // fingers spread in V
+      }
+
+      // Index only ── disambiguate by hook and thumb contact ─────────────────
+      if (ix && !mx && !rx && !pk) {
+        if (ixHook)          return 'X'; // index bent like a hook
+        if (tM && tR && tPk) return 'D'; // others arc to touch thumb
+        return 'G';                       // index pointing outward
+      }
+
+      // No fingers extended ── fist variants ─────────────────────────────────
+      if (!ix && !mx && !rx && !pk) {
+        if (tI && tM && tR && tPk) return 'O'; // all tips meet thumb in circle
+        if (th)                    return 'A'; // thumb out to side of fist
+        if (tI && !tM)             return 'T'; // thumb tucked between idx + mid
+        if (tI)                    return 'S'; // thumb draped over curled fingers
+        return 'E';                             // fingers hooked down, no thumb
+      }
+
+      return null; // unrecognised
+    }
+
     // ── MediaPipe result handler ──────────────────────────────────────────────
     const EMPTY = [false, false, false, false, false];
     let lastSeen = 0;
@@ -398,9 +502,9 @@
         drawHand(lm, isRight ? 'Right' : 'Left');
 
         if (isRight) {
-          rightData = { fingerStates, count };
+          rightData = { fingerStates, count, lm };
         } else {
-          leftData  = { fingerStates, count };
+          leftData  = { fingerStates, count, lm };
         }
       }
 
@@ -413,6 +517,16 @@
 
       cardLeft.classList.toggle('active',  !!leftData);
       cardRight.classList.toggle('active', !!rightData);
+
+      // ASL alphabet
+      const hasHands = !!(leftData || rightData);
+      aslSectionEl.style.display = hasHands ? '' : 'none';
+      const lLetter = leftData  ? (classifyASL(leftData.lm)  || '?') : '—';
+      const rLetter = rightData ? (classifyASL(rightData.lm) || '?') : '—';
+      aslLetterLeft.textContent  = lLetter;
+      aslLetterRight.textContent = rLetter;
+      aslCardLeft.classList.toggle('active',  !!leftData);
+      aslCardRight.classList.toggle('active', !!rightData);
 
       if (hands.length > 0) {
         lastSeen = Date.now();
