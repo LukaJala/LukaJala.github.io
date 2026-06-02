@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hand Finger Tracker</title>
+  <title>Arcane Weave</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -137,30 +137,6 @@
     .finger-dot.up { background: #38bdf8; }
     .hand-fingers.right .finger-dot.up { background: #f472b6; }
 
-    /* ── ASL alphabet ── */
-    .asl-section {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-    }
-    .asl-section h2 {
-      font-size: 0.72rem;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: #444;
-    }
-    .asl-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
-    .asl-letter {
-      font-size: 4.5rem;
-      font-weight: 900;
-      line-height: 1;
-      letter-spacing: -2px;
-      transition: color 0.15s;
-    }
-    #asl-letter-left  { color: #38bdf8; }
-    #asl-letter-right { color: #f472b6; }
-
     /* ── status bar ── */
     #status {
       font-size: 0.82rem;
@@ -202,8 +178,8 @@
   </div>
 
   <header>
-    <h1>Hand Finger Tracker</h1>
-    <p>Hold your hands up to the camera — fingers are counted in real time.</p>
+    <h1>Arcane Weave</h1>
+    <p>Move your fingers to weave light — pinch to spark, open your hand to bloom.</p>
   </header>
 
   <div class="video-wrap">
@@ -251,21 +227,6 @@
     </div>
   </div>
 
-  <!-- ASL fingerspelling -->
-  <div class="asl-section" id="asl-section" style="display:none">
-    <h2>ASL Alphabet</h2>
-    <div class="asl-row">
-      <div class="card" id="asl-card-left">
-        <label>Left hand</label>
-        <div class="asl-letter" id="asl-letter-left">—</div>
-      </div>
-      <div class="card" id="asl-card-right">
-        <label>Right hand</label>
-        <div class="asl-letter" id="asl-letter-right">—</div>
-      </div>
-    </div>
-  </div>
-
   <p id="status" class="warn">Initialising camera…</p>
 
   <!-- MediaPipe Hands via CDN -->
@@ -285,13 +246,8 @@
     const numTotal   = document.getElementById('num-total');
     const cardLeft   = document.getElementById('card-left');
     const cardRight  = document.getElementById('card-right');
-    const dotsLeft      = document.querySelectorAll('#dots-left .finger-dot');
-    const dotsRight     = document.querySelectorAll('#dots-right .finger-dot');
-    const aslSectionEl  = document.getElementById('asl-section');
-    const aslLetterLeft = document.getElementById('asl-letter-left');
-    const aslLetterRight= document.getElementById('asl-letter-right');
-    const aslCardLeft   = document.getElementById('asl-card-left');
-    const aslCardRight  = document.getElementById('asl-card-right');
+    const dotsLeft  = document.querySelectorAll('#dots-left .finger-dot');
+    const dotsRight = document.querySelectorAll('#dots-right .finger-dot');
 
     // ── Landmark indices ──────────────────────────────────────────────────────
     //  0 = wrist
@@ -365,108 +321,305 @@
       return states;
     }
 
-    // ── Canvas drawing ────────────────────────────────────────────────────────
-    const COLORS = {
-      Left:  { line: '#38bdf8', dot: '#0ea5e9', tip: '#7dd3fc' },
-      Right: { line: '#f472b6', dot: '#ec4899', tip: '#fbcfe8' },
-    };
-
-    function px(lm) {
-      return [lm.x * canvas.width, lm.y * canvas.height];
-    }
-
-    function drawHand(lm, label) {
-      const c = COLORS[label] || COLORS.Left;
-
-      // Connections
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = c.line + 'cc';
-      for (const [a, b] of CONNECTIONS) {
-        ctx.beginPath();
-        ctx.moveTo(...px(lm[a]));
-        ctx.lineTo(...px(lm[b]));
-        ctx.stroke();
-      }
-
-      // Joints
-      for (let i = 0; i < lm.length; i++) {
-        const isTip = TIPS.includes(i);
-        const [x, y] = px(lm[i]);
-        ctx.beginPath();
-        ctx.arc(x, y, isTip ? 7 : 5, 0, Math.PI * 2);
-        ctx.fillStyle = isTip ? c.tip : c.dot;
-        ctx.fill();
-        ctx.strokeStyle = '#000a';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-    }
-
     // ── Update UI ─────────────────────────────────────────────────────────────
     function updateDots(dotEls, states) {
-      dotEls.forEach((el, i) => {
-        el.classList.toggle('up', !!states[i]);
-      });
+      dotEls.forEach((el, i) => el.classList.toggle('up', !!states[i]));
     }
 
-    // ── ASL alphabet classifier ───────────────────────────────────────────────
-    // Identifies ~18 static ASL fingerspelling letters from hand landmarks.
-    // Letters requiring motion (J, Z) or indistinguishable without depth
-    // (C, H, M, N, P, Q) return null.
-    function classifyASL(lm) {
-      const [th, ix, mx, rx, pk] = getFingerStates(lm);
+    // ── Arcane effects system ─────────────────────────────────────────────────
 
-      // Distances normalised by palm height (wrist → middle MCP)
-      const pH = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 0.01;
-      const dn = (a, b) => Math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y) / pH;
+    // Per-finger hues: thumb=gold, index=cyan, middle=blue, ring=violet, pinky=magenta
+    const TIP_H = [45, 190, 220, 270, 310];
 
-      // Is thumb tip close to each fingertip?
-      const tI  = dn(4, 8)  < 0.45;
-      const tM  = dn(4, 12) < 0.45;
-      const tR  = dn(4, 16) < 0.45;
-      const tPk = dn(4, 20) < 0.45;
+    const particles   = [];
+    const MAX_PTCL    = 420;
+    const TRAIL_LEN   = 22;
+    const trails      = { left: Array.from({length:5},()=>[]), right: Array.from({length:5},()=>[]) };
+    const pinchActive = { left: new Set(),  right: new Set()  };
+    const bloomCD     = { left: 0,          right: 0          };
+    const stillness   = { left: 0,          right: 0          };
+    let efxFrame = 0;
 
-      // How far apart are the index and middle fingertips?
-      const imSep = dn(8, 12);
+    const PINCH_PX   = 44;
+    const MAX_CONN_F = 0.48;   // fraction of canvas.width where connections fade out
 
-      // Index bent/hooked: not extended but tip is close to its own MCP
-      const ixHook = !ix && dn(8, 5) < 0.85;
+    function palmPx(lm) {
+      let x = 0, y = 0;
+      for (const m of MCPS) { x += lm[m].x; y += lm[m].y; }
+      return { x: x/4 * canvas.width, y: y/4 * canvas.height };
+    }
 
-      // Unique extension patterns ─────────────────────────────────────────────
-      if (!th &&  ix &&  mx &&  rx &&  pk) return 'B'; // all 4 fingers up
-      if ( th && !ix && !mx && !rx &&  pk) return 'Y'; // thumb + pinky (shaka)
-      if ( th &&  ix && !mx && !rx && !pk) return 'L'; // index up + thumb out
-      if (!th && !ix && !mx && !rx &&  pk) return 'I'; // pinky only
-      if (!th &&  ix &&  mx &&  rx && !pk) return 'W'; // 3 fingers up
+    // ── Drawing layers ────────────────────────────────────────────────────────
 
-      // F: middle+ring+pinky up, index curled to touch thumb
-      if (!ix && mx && rx && pk && tI) return 'F';
-
-      // Index + middle ── disambiguate by thumb contact and spread ───────────
-      if (ix && mx && !rx && !pk) {
-        if (tM)           return 'K'; // thumb between fingers
-        if (imSep < 0.18) return 'R'; // fingers crossed/overlapping
-        if (imSep < 0.38) return 'U'; // fingers parallel and close
-        return 'V';                    // fingers spread in V
+    function drawHandStructure(lm) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(180,210,255,0.10)';
+      ctx.lineWidth = 1;
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+        ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+        ctx.stroke();
       }
+      ctx.restore();
+    }
 
-      // Index only ── disambiguate by hook and thumb contact ─────────────────
-      if (ix && !mx && !rx && !pk) {
-        if (ixHook)          return 'X'; // index bent like a hook
-        if (tM && tR && tPk) return 'D'; // others arc to touch thumb
-        return 'G';                       // index pointing outward
+    function drawConnections(tipPx) {
+      const maxD = canvas.width * MAX_CONN_F;
+      ctx.save();
+      for (let a = 0; a < 5; a++) {
+        for (let b = a+1; b < 5; b++) {
+          const [ax,ay] = tipPx[a], [bx,by] = tipPx[b];
+          const d = Math.hypot(ax-bx, ay-by);
+          if (d >= maxD) continue;
+          const t  = 1 - d/maxD;
+          const ha = TIP_H[a], hb = TIP_H[b];
+          // Soft glow halo
+          ctx.strokeStyle = `hsla(${(ha+hb)*.5},100%,70%,${0.10*t})`;
+          ctx.lineWidth   = 16*t;
+          ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+          // Crisp gradient core
+          const g = ctx.createLinearGradient(ax,ay,bx,by);
+          g.addColorStop(0, `hsla(${ha},100%,78%,${0.90*t})`);
+          g.addColorStop(1, `hsla(${hb},100%,78%,${0.90*t})`);
+          ctx.strokeStyle = g;
+          ctx.lineWidth   = 1 + 2.8*t;
+          ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+        }
       }
+      ctx.restore();
+    }
 
-      // No fingers extended ── fist variants ─────────────────────────────────
-      if (!ix && !mx && !rx && !pk) {
-        if (tI && tM && tR && tPk) return 'O'; // all tips meet thumb in circle
-        if (th)                    return 'A'; // thumb out to side of fist
-        if (tI && !tM)             return 'T'; // thumb tucked between idx + mid
-        if (tI)                    return 'S'; // thumb draped over curled fingers
-        return 'E';                             // fingers hooked down, no thumb
+    function drawTipOrbs(tipPx) {
+      ctx.save();
+      for (let f = 0; f < 5; f++) {
+        const [x,y] = tipPx[f], h = TIP_H[f];
+        const pulse = 0.84 + 0.16 * Math.sin(efxFrame*0.09 + f*1.2);
+        const r = 7*pulse;
+        const grd = ctx.createRadialGradient(x,y,0, x,y, r*3.5);
+        grd.addColorStop(0,   `hsla(${h},100%,88%,0.55)`);
+        grd.addColorStop(0.4, `hsla(${h},100%,65%,0.15)`);
+        grd.addColorStop(1,   `hsla(${h},100%,65%,0)`);
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(x, y, r*3.5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = `hsla(${h},100%,97%,0.93)`;
+        ctx.beginPath(); ctx.arc(x, y, r,     0, Math.PI*2); ctx.fill();
       }
+      ctx.restore();
+    }
 
-      return null; // unrecognised
+    function drawTrails(side) {
+      ctx.save();
+      const hist = trails[side];
+      for (let f = 0; f < 5; f++) {
+        const h = TIP_H[f];
+        hist[f].forEach(({x,y}, i) => {
+          const p = i/TRAIL_LEN;
+          ctx.globalAlpha = (1-p)*0.46;
+          ctx.fillStyle   = `hsl(${h},100%,80%)`;
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max((1-p)*4.5, 0.5), 0, Math.PI*2);
+          ctx.fill();
+        });
+      }
+      ctx.restore();
+    }
+
+    // Rotating 6-pointed sigil that materialises over a still palm
+    function drawRune(palm, intensity) {
+      ctx.save();
+      ctx.translate(palm.x, palm.y);
+      ctx.globalAlpha = intensity;
+      const rot = efxFrame*0.007;
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.save();
+        ctx.rotate(pass===0 ? rot : -rot*0.7);
+        const rr = 58 + pass*9;
+        ctx.strokeStyle = pass===0 ? 'hsla(270,100%,72%,0.85)' : 'hsla(45,100%,70%,0.55)';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.arc(0,0,rr,0,Math.PI*2); ctx.stroke();
+        ctx.beginPath();
+        for (let k = 0; k < 7; k++) {
+          const a   = (k/6)*Math.PI*2 - Math.PI/2;
+          const len = k%2===0 ? rr*0.82 : rr*0.42;
+          k===0 ? ctx.moveTo(Math.cos(a)*len, Math.sin(a)*len)
+                : ctx.lineTo(Math.cos(a)*len, Math.sin(a)*len);
+        }
+        ctx.closePath(); ctx.stroke();
+        ctx.restore();
+      }
+      ctx.fillStyle = 'hsla(270,100%,82%,0.9)';
+      for (let k = 0; k < 6; k++) {
+        const a = (k/6)*Math.PI*2 - Math.PI/2 + rot;
+        ctx.beginPath();
+        ctx.arc(Math.cos(a)*58*0.82, Math.sin(a)*58*0.82, 2.5, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ── Particle system ───────────────────────────────────────────────────────
+
+    function spawnP(x, y, vx, vy, h, size, decay, type) {
+      if (particles.length >= MAX_PTCL) particles.shift();
+      particles.push({x, y, vx, vy, h, size, decay, life:1, type});
+    }
+
+    function burst(x, y, n, h1, h2) {
+      for (let i = 0; i < n; i++) {
+        const a = (i/n)*Math.PI*2 + Math.random()*0.7;
+        const s = 2.5 + Math.random()*5.5;
+        spawnP(x, y, Math.cos(a)*s, Math.sin(a)*s - 0.8,
+               Math.random()<0.5?h1:h2,
+               3+Math.random()*4.5, 0.019+Math.random()*0.022,
+               Math.random()<0.5?'star':'orb');
+      }
+    }
+
+    function updateAndDrawParticles() {
+      for (let i = particles.length-1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.95; p.vy *= 0.95; p.vy += 0.034;
+        p.life -= p.decay;
+        if (p.life <= 0) { particles.splice(i,1); continue; }
+
+        ctx.save();
+        const r = p.size * p.life;
+
+        if (p.type === 'star') {
+          ctx.globalAlpha = p.life * p.life;
+          ctx.fillStyle   = `hsl(${p.h},100%,93%)`;
+          ctx.beginPath();
+          for (let k = 0; k < 8; k++) {
+            const a   = (k/8)*Math.PI*2 - Math.PI/2;
+            const len = k%2===0 ? r : r*0.37;
+            k===0 ? ctx.moveTo(p.x+Math.cos(a)*len, p.y+Math.sin(a)*len)
+                  : ctx.lineTo(p.x+Math.cos(a)*len, p.y+Math.sin(a)*len);
+          }
+          ctx.closePath(); ctx.fill();
+        } else {
+          // Two-pass cheap glow (no radialGradient for perf)
+          ctx.globalAlpha = p.life * p.life * 0.28;
+          ctx.fillStyle   = `hsl(${p.h},100%,68%)`;
+          ctx.beginPath(); ctx.arc(p.x, p.y, r*2.2, 0, Math.PI*2); ctx.fill();
+          ctx.globalAlpha = p.life * p.life;
+          ctx.fillStyle   = `hsl(${p.h},100%,93%)`;
+          ctx.beginPath(); ctx.arc(p.x, p.y, r,     0, Math.PI*2); ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    // ── Per-frame emitters ────────────────────────────────────────────────────
+
+    function updateTrails(side, tipPx) {
+      const hist = trails[side];
+      for (let f = 0; f < 5; f++) {
+        hist[f].unshift({x: tipPx[f][0], y: tipPx[f][1]});
+        if (hist[f].length > TRAIL_LEN) hist[f].pop();
+      }
+    }
+
+    function emitVelocitySparks(side, tipPx) {
+      const hist = trails[side];
+      for (let f = 0; f < 5; f++) {
+        if (hist[f].length < 4) continue;
+        const vx  = hist[f][0].x - hist[f][3].x;
+        const vy  = hist[f][0].y - hist[f][3].y;
+        const spd = Math.hypot(vx, vy);
+        if (spd < 9) continue;
+        const n = Math.min(Math.floor(spd/7), 5);
+        for (let i = 0; i < n; i++) {
+          const a = Math.atan2(vy,vx) + (Math.random()-0.5)*1.8;
+          const s = spd*(0.15+Math.random()*0.35);
+          spawnP(tipPx[f][0], tipPx[f][1], Math.cos(a)*s, Math.sin(a)*s,
+                 TIP_H[f], 2+Math.random()*3.5, 0.038+Math.random()*0.030, 'orb');
+        }
+      }
+    }
+
+    function detectPinches(side, tipPx) {
+      const active = pinchActive[side];
+      for (let a = 0; a < 5; a++) {
+        for (let b = a+1; b < 5; b++) {
+          const key = `${a}-${b}`;
+          const d   = Math.hypot(tipPx[a][0]-tipPx[b][0], tipPx[a][1]-tipPx[b][1]);
+          if (d < PINCH_PX && !active.has(key)) {
+            active.add(key);
+            burst((tipPx[a][0]+tipPx[b][0])/2, (tipPx[a][1]+tipPx[b][1])/2,
+                  24, TIP_H[a], TIP_H[b]);
+          } else if (d >= PINCH_PX) {
+            active.delete(key);
+          }
+        }
+      }
+    }
+
+    function tryPalmBloom(side, palm) {
+      if (bloomCD[side] > 0) return;
+      bloomCD[side] = 80;
+      for (let i = 0; i < 45; i++) {
+        const a = Math.random()*Math.PI*2, s = 1.5+Math.random()*5;
+        spawnP(palm.x, palm.y, Math.cos(a)*s, Math.sin(a)*s-2.5,
+               TIP_H[Math.floor(Math.random()*5)],
+               5+Math.random()*8, 0.010+Math.random()*0.016,
+               Math.random()<0.55?'orb':'star');
+      }
+    }
+
+    // Crackling energy arc between both palms when two hands are in view
+    function drawCrossHandArc(lmL, lmR) {
+      const pL = palmPx(lmL), pR = palmPx(lmR);
+      const f  = efxFrame*0.055, segs = 28;
+      ctx.save();
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.strokeStyle = pass===0 ? 'rgba(167,139,250,0.62)' : 'rgba(167,139,250,0.14)';
+        ctx.lineWidth   = pass===0 ? 1.5 : 9;
+        ctx.beginPath();
+        for (let i = 0; i <= segs; i++) {
+          const t  = i/segs;
+          const j1 = (pass===0?11:22)*Math.sin(t*8*Math.PI + (pass?-f:f));
+          const j2 = (pass===0? 8:16)*Math.cos(t*6*Math.PI + f);
+          const x  = pL.x + (pR.x-pL.x)*t + j1;
+          const y  = pL.y + (pR.y-pL.y)*t + j2;
+          i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+        }
+        ctx.stroke();
+      }
+      // Trickle particles along the arc
+      if (Math.random() < 0.27) {
+        const t = Math.random();
+        spawnP(pL.x+(pR.x-pL.x)*t+(Math.random()-0.5)*18,
+               pL.y+(pR.y-pL.y)*t+(Math.random()-0.5)*18,
+               (Math.random()-0.5)*2, -1.5-Math.random(),
+               270, 2.5+Math.random()*2.5, 0.04, 'orb');
+      }
+      ctx.restore();
+    }
+
+    // Base pass for one hand: structure, trails, connections, and particle emission
+    function drawHandBase(lm, side) {
+      const tipPx = TIPS.map(i => [lm[i].x*canvas.width, lm[i].y*canvas.height]);
+      const [, ix, mx, rx, pk] = getFingerStates(lm);
+
+      updateTrails(side, tipPx);
+      drawHandStructure(lm);
+      drawTrails(side);
+      drawConnections(tipPx);
+      emitVelocitySparks(side, tipPx);
+      detectPinches(side, tipPx);
+      bloomCD[side] = Math.max(0, bloomCD[side]-1);
+
+      // Bloom when all four fingers are extended
+      if (ix && mx && rx && pk) tryPalmBloom(side, palmPx(lm));
+
+      // Accumulate stillness; draw rune once calm for ~2 s
+      const avgSpd = trails[side].reduce((s, h) =>
+        s + (h.length >= 4 ? Math.hypot(h[0].x-h[3].x, h[0].y-h[3].y) : 0), 0) / 5;
+      if (avgSpd < 3.5) stillness[side] = Math.min(stillness[side]+1, 120);
+      else              stillness[side] = Math.max(stillness[side]-4, 0);
+      if (stillness[side] > 20) drawRune(palmPx(lm), stillness[side]/120);
     }
 
     // ── MediaPipe result handler ──────────────────────────────────────────────
@@ -477,6 +630,7 @@
       canvas.width  = video.videoWidth  || 640;
       canvas.height = video.videoHeight || 480;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      efxFrame++;
 
       const hands      = results.multiHandLandmarks || [];
       const handedness = results.multiHandedness    || [];
@@ -487,25 +641,39 @@
       let leftData = null, rightData = null;
 
       for (let i = 0; i < hands.length; i++) {
-        const lm = hands[i];
-
-        // Use MediaPipe's anatomical handedness label — it never flips when hands
-        // cross or move to the center of frame.  MediaPipe labels in the raw
-        // (unmirrored) camera frame: the person's right hand appears on the image's
-        // left, so MediaPipe calls it 'Left'.  We invert the label here.
+        const lm      = hands[i];
         const mpLabel = handedness[i]?.label;
         const isRight = mpLabel != null ? mpLabel === 'Left' : (1 - lm[0].x) > 0.5;
-
         const fingerStates = getFingerStates(lm);
-        const count = fingerStates.filter(Boolean).length;
+        const count        = fingerStates.filter(Boolean).length;
+        if (isRight) rightData = { fingerStates, count, lm };
+        else         leftData  = { fingerStates, count, lm };
+      }
 
-        drawHand(lm, isRight ? 'Right' : 'Left');
+      // Layer 1 — hand structure, trails, connections, particle emission
+      if (leftData)              drawHandBase(leftData.lm,  'left');
+      if (rightData)             drawHandBase(rightData.lm, 'right');
+      if (leftData && rightData) drawCrossHandArc(leftData.lm, rightData.lm);
 
-        if (isRight) {
-          rightData = { fingerStates, count, lm };
-        } else {
-          leftData  = { fingerStates, count, lm };
-        }
+      // Layer 2 — particles float above connections
+      updateAndDrawParticles();
+
+      // Layer 3 — tip orbs on top of everything
+      if (leftData)
+        drawTipOrbs(TIPS.map(i => [leftData.lm[i].x  * canvas.width, leftData.lm[i].y  * canvas.height]));
+      if (rightData)
+        drawTipOrbs(TIPS.map(i => [rightData.lm[i].x * canvas.width, rightData.lm[i].y * canvas.height]));
+
+      // Reset trail / pinch / stillness for absent hands
+      if (!leftData) {
+        trails.left.forEach(t  => t.length = 0);
+        pinchActive.left.clear();
+        stillness.left = 0;
+      }
+      if (!rightData) {
+        trails.right.forEach(t => t.length = 0);
+        pinchActive.right.clear();
+        stillness.right = 0;
       }
 
       if (leftData)  updateDots(dotsLeft,  leftData.fingerStates);
@@ -518,16 +686,6 @@
       cardLeft.classList.toggle('active',  !!leftData);
       cardRight.classList.toggle('active', !!rightData);
 
-      // ASL alphabet
-      const hasHands = !!(leftData || rightData);
-      aslSectionEl.style.display = hasHands ? '' : 'none';
-      const lLetter = leftData  ? (classifyASL(leftData.lm)  || '?') : '—';
-      const rLetter = rightData ? (classifyASL(rightData.lm) || '?') : '—';
-      aslLetterLeft.textContent  = lLetter;
-      aslLetterRight.textContent = rLetter;
-      aslCardLeft.classList.toggle('active',  !!leftData);
-      aslCardRight.classList.toggle('active', !!rightData);
-
       if (hands.length > 0) {
         lastSeen = Date.now();
         statusEl.className = 'ok';
@@ -537,7 +695,7 @@
         statusEl.className = 'warn';
         statusEl.textContent = elapsed < 1500
           ? 'Tracking lost…'
-          : 'No hands detected — show your hand to the camera';
+          : 'No hands detected — show your hands!';
       }
     }
 
