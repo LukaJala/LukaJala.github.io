@@ -259,6 +259,7 @@
     //  17-20 = pinky
     const TIPS = [4, 8, 12, 16, 20];  // thumb + 4 fingers
     const PIPS = [3, 6, 10, 14, 18];  // one joint below each tip (thumb IP, others PIP)
+    const MCPS = [5, 9, 13, 17];      // MCP knuckles for index → pinky
 
     // Hand skeleton connections for drawing
     const CONNECTIONS = [
@@ -272,37 +273,50 @@
 
     // ── Finger counting ───────────────────────────────────────────────────────
 
-    // Determine anatomical handedness from landmark geometry, not MediaPipe's label.
-    // Cross product of (wrist→thumbCMC) × (wrist→pinkyMCP):
-    //   positive → person's right hand (thumb is to the anatomical-left of pinky in raw frame)
-    //   negative → person's left hand
-    // This is stable even when the hand rotates in place.
+    // Cross product of (wrist→thumbCMC) × (wrist→pinkyMCP).
+    // Positive → person's right hand; negative → person's left hand.
     function crossSign(lm) {
       const v1x = lm[1].x - lm[0].x, v1y = lm[1].y - lm[0].y;
       const v2x = lm[17].x - lm[0].x, v2y = lm[17].y - lm[0].y;
       return v1x * v2y - v1y * v2x;
     }
 
-    // Returns an array of 5 booleans (thumb … pinky), true = finger up.
+    // Returns an array of 5 booleans (thumb … pinky), true = finger extended.
     function getFingerStates(lm) {
       const states = [false, false, false, false, false];
 
-      // Thumb: use anatomical chirality to pick the correct x-axis comparison.
-      // Right hand in raw camera coords: thumb tip is further LEFT (smaller x) when extended.
-      // Left  hand in raw camera coords: thumb tip is further RIGHT (larger x) when extended.
-      // If the cross product is near zero (hand nearly edge-on), fall back to y comparison.
-      const cs = crossSign(lm);
-      if (Math.abs(cs) < 0.02) {
-        states[0] = lm[4].y < lm[3].y;  // thumb above IP joint
-      } else if (cs > 0) {
-        states[0] = lm[4].x < lm[3].x;  // right hand
+      // Compute the hand's "up" direction: wrist → average of the four MCP knuckles.
+      // Projecting onto this axis makes all checks orientation-independent — they work
+      // whether the hand is upright, horizontal, tilted, or angled toward the camera.
+      let ux = 0, uy = 0;
+      for (const m of MCPS) { ux += lm[m].x; uy += lm[m].y; }
+      ux = ux / 4 - lm[0].x;
+      uy = uy / 4 - lm[0].y;
+      const ulen = Math.sqrt(ux * ux + uy * uy);
+      if (ulen > 1e-4) { ux /= ulen; uy /= ulen; }
+
+      // proj: signed distance of landmark p along the "up" axis from the wrist.
+      const proj = p => (p.x - lm[0].x) * ux + (p.y - lm[0].y) * uy;
+
+      // Thumb abducts laterally — perpendicular to the finger axis.
+      // (-uy, ux) is the perpendicular unit vector; crossSign gives chirality.
+      const cs  = crossSign(lm);
+      const qx  = -uy, qy = ux;
+      const tTip = (lm[4].x - lm[0].x) * qx + (lm[4].y - lm[0].y) * qy;
+      const tIP  = (lm[3].x - lm[0].x) * qx + (lm[3].y - lm[0].y) * qy;
+      if (Math.abs(cs) < 0.015) {
+        // Hand nearly edge-on: fall back to longitudinal extension check.
+        states[0] = proj(lm[4]) > proj(lm[3]);
       } else {
-        states[0] = lm[4].x > lm[3].x;  // left hand
+        // Right hand (cs>0): thumb extends toward the negative-perpendicular side.
+        // Left  hand (cs<0): thumb extends toward the positive-perpendicular side.
+        states[0] = cs > 0 ? tTip < tIP : tTip > tIP;
       }
 
-      // Fingers (index → pinky): tip y < pip y  →  finger is raised
+      // Fingers 1–4: tip must project further along the "up" axis than its PIP joint.
+      // This catches bent/curled fingers regardless of how the hand is rotated.
       for (let i = 1; i <= 4; i++) {
-        states[i] = lm[TIPS[i]].y < lm[PIPS[i]].y;
+        states[i] = proj(lm[TIPS[i]]) > proj(lm[PIPS[i]]);
       }
 
       return states;
@@ -361,19 +375,23 @@
       canvas.height = video.videoHeight || 480;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const hands = results.multiHandLandmarks || [];
+      const hands      = results.multiHandLandmarks || [];
+      const handedness = results.multiHandedness    || [];
 
       updateDots(dotsLeft,  EMPTY);
       updateDots(dotsRight, EMPTY);
 
       let leftData = null, rightData = null;
 
-      for (const lm of hands) {
-        // Assign left/right purely from the wrist's position in the mirrored display.
-        // mirrored_x = 1 - raw_x  →  > 0.5 means the hand is on the right of the
-        // mirror, which is the user's right hand.  This never flips during rotation.
-        const mirroredWristX = 1 - lm[0].x;
-        const isRight = mirroredWristX > 0.5;
+      for (let i = 0; i < hands.length; i++) {
+        const lm = hands[i];
+
+        // Use MediaPipe's anatomical handedness label — it never flips when hands
+        // cross or move to the center of frame.  MediaPipe labels in the raw
+        // (unmirrored) camera frame: the person's right hand appears on the image's
+        // left, so MediaPipe calls it 'Left'.  We invert the label here.
+        const mpLabel = handedness[i]?.label;
+        const isRight = mpLabel != null ? mpLabel === 'Left' : (1 - lm[0].x) > 0.5;
 
         const fingerStates = getFingerStates(lm);
         const count = fingerStates.filter(Boolean).length;
