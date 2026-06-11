@@ -15,7 +15,8 @@
     <span>a tiny world in a sandbox</span>
   </div>
   <nav class="scenes">
-    <button data-scene="volcano" class="on">Volcano</button>
+    <button data-scene="island" class="on">Island</button>
+    <button data-scene="volcano">Volcano</button>
     <button data-scene="springs">Springs</button>
     <button data-scene="blank">Blank</button>
   </nav>
@@ -40,6 +41,8 @@
   <aside>
     <h2>Elements</h2>
     <div class="palette" id="palette"></div>
+    <h2 style="margin-top:12px">Creatures</h2>
+    <div class="palette" id="critters"></div>
     <div id="info"></div>
     <div class="brush-row">
       <label for="brush">Brush</label>
@@ -54,6 +57,7 @@
   <span class="stat" id="f-tps"></span>
   <span class="stat" id="f-fps"></span>
   <span class="stat" id="f-cells"></span>
+  <span class="stat" id="f-pop"></span>
   <span class="stat" id="f-at"></span>
   <span class="credit">no dependencies · no build · engine, tests &amp; screenshots rendered headlessly — built by <em>Claude (Fable 5)</em></span>
 </footer>
@@ -69,6 +73,7 @@
       <kbd>right drag</kbd><span>erase</span>
       <kbd>wheel · [ ]</kbd><span>brush size</span>
       <kbd>1–0, Q W G O V E</kbd><span>quick-select elements</span>
+      <kbd>A B F S</kbd><span>villager · rabbit · bird · fish</span>
       <kbd>Space</kbd><span>pause / resume</span>
       <kbd>.</kbd><span>step one tick while paused</span>
       <kbd>R</kbd><span>regenerate the scene with a fresh seed</span>
@@ -87,6 +92,16 @@
       <li>Plants drink water to grow. Ice creeps across still ponds.</li>
       <li>Acid eats nearly everything — but never glass, and never wall.</li>
       <li>Spouts pour forever; the void devours forever. Plumbing awaits.</li>
+    </ul>
+
+    <h4>Life</h4>
+    <ul>
+      <li>Villagers wander, flee danger, chop trees — and with ten wood, build a hut.</li>
+      <li>Two grown villagers side by side will, in time, raise a child. Villages grow.</li>
+      <li>Rabbits graze the grass; two well-fed rabbits make a third.</li>
+      <li>Birds ride the sky and perch in trees. Smoke sends them wheeling away.</li>
+      <li>Fish need water. Everything needs to not be on fire.</li>
+      <li>Lava, acid, drowning, long falls, explosions: a soul has many exits.</li>
     </ul>
 
     <h4>Secrets</h4>

@@ -2,14 +2,15 @@
 'use strict';
 (() => {
 
-const { E, ELEMENTS, World, generateScene, render, GLOW_SHIFT } = window.PixelAlchemy;
+const { E, ELEMENTS, C, CREATURES, World, generateScene, render, GLOW_SHIFT } = window.PixelAlchemy;
 
-const W = 384, H = 240, SCALE = 3;
+const W = 640, H = 360, SCALE = 2;
 const GW = (W >> GLOW_SHIFT) + 1, GH = (H >> GLOW_SHIFT) + 1;
+const CBASE = 100; // palette ids >= CBASE are creature spawners, not elements
 
 // --- state ---
 const params = new URLSearchParams(location.search);
-let scene = ['volcano', 'springs', 'blank'].includes(params.get('scene')) ? params.get('scene') : 'volcano';
+let scene = ['island', 'volcano', 'springs', 'blank'].includes(params.get('scene')) ? params.get('scene') : 'island';
 let seed = (parseInt(params.get('seed'), 10) >>> 0) || ((Math.random() * 0xffffffff) >>> 0);
 let world = null;
 let paused = false;
@@ -129,6 +130,18 @@ const sfx = {
     if (!this.ctx || muted) return;
     this.noise(0.25, 'highpass', 2200, 0.1 * a);
   },
+  lastLife: 0,
+  life(kind) {
+    // village sounds, gently rate-limited so a busy world doesn't chatter
+    if (!this.ctx || muted) return;
+    const now = performance.now();
+    if (now - this.lastLife < 180) return;
+    this.lastLife = now;
+    if (kind === 'chop')       this.noise(0.05, 'bandpass', 900, 0.07);
+    else if (kind === 'build') this.noise(0.12, 'lowpass', 420, 0.14, 120);
+    else if (kind === 'birth') this.tone(0.14, 'sine', 620, 980, 0.05);
+    else if (kind === 'death') this.tone(0.18, 'triangle', 240, 60, 0.06);
+  },
   setCrackle(level) {
     if (!this.ctx || !this.crackleGain) return;
     const target = muted ? 0 : Math.min(1, level) * 0.13;
@@ -169,28 +182,37 @@ const KEYS = { [E.SAND]: '1', [E.WATER]: '2', [E.OIL]: '3', [E.ACID]: '4', [E.LA
   [E.FIRE]: '6', [E.GUNPOWDER]: '7', [E.WOOD]: '8', [E.PLANT]: '9', [E.ICE]: '0',
   [E.STONE]: 'Q', [E.WALL]: 'W', [E.GLASS]: 'G', [E.SPOUT]: 'O', [E.VOID]: 'V', [E.EMPTY]: 'E' };
 
-const paletteEl = $('palette');
+const CORDER = [C.HUMAN, C.RABBIT, C.BIRD, C.FISH].map(t => CBASE + t);
+const CKEYS = { [CBASE + C.HUMAN]: 'A', [CBASE + C.RABBIT]: 'B',
+  [CBASE + C.BIRD]: 'F', [CBASE + C.FISH]: 'S' };
+
 const infoEl = $('info');
 const chips = new Map();
-for (const id of ORDER) {
-  const el = ELEMENTS[id];
-  const btn = document.createElement('button');
-  btn.className = 'chip';
-  btn.innerHTML = `<span class="sw" style="background:rgb(${el.color.join(',')})"></span>` +
-    `<span class="nm">${el.name}</span><span class="key">${KEYS[id]}</span>`;
-  btn.addEventListener('click', () => selectElement(id));
-  btn.addEventListener('mouseenter', () => showInfo(id));
-  btn.addEventListener('mouseleave', () => showInfo(element));
-  paletteEl.appendChild(btn);
-  chips.set(id, btn);
+function meta(id) { return id >= CBASE ? CREATURES[id - CBASE] : ELEMENTS[id]; }
+function addChips(container, ids, keys) {
+  for (const id of ids) {
+    const el = meta(id);
+    const btn = document.createElement('button');
+    btn.className = 'chip';
+    btn.innerHTML = `<span class="sw" style="background:rgb(${el.color.join(',')})"></span>` +
+      `<span class="nm">${el.name}</span><span class="key">${keys[id]}</span>`;
+    btn.addEventListener('click', () => selectElement(id));
+    btn.addEventListener('mouseenter', () => showInfo(id));
+    btn.addEventListener('mouseleave', () => showInfo(element));
+    container.appendChild(btn);
+    chips.set(id, btn);
+  }
 }
+addChips($('palette'), ORDER, KEYS);
+addChips($('critters'), CORDER, CKEYS);
+
 function selectElement(id) {
   element = id;
   for (const [eid, btn] of chips) btn.classList.toggle('on', eid === id);
   showInfo(id);
 }
 function showInfo(id) {
-  const el = ELEMENTS[id];
+  const el = meta(id);
   infoEl.innerHTML = `<b>${el.name}</b>${el.desc}`;
 }
 
@@ -213,6 +235,7 @@ function paintLine(a, b, id) {
 }
 
 view.addEventListener('contextmenu', (e) => e.preventDefault());
+let lastSpawnPt = null;
 view.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   view.setPointerCapture(e.pointerId);
@@ -222,6 +245,12 @@ view.addEventListener('pointerdown', (e) => {
   erasing = e.button === 2;
   lastPt = mousePt = toSim(e);
   snapshot();
+  if (!erasing && element >= CBASE) {
+    world.spawnCreature(element - CBASE, lastPt.x, lastPt.y);
+    lastSpawnPt = lastPt;
+    sfx.blip(E.PLANT);
+    return;
+  }
   const id = erasing ? E.EMPTY : element;
   world.paint(lastPt.x, lastPt.y, brush, id);
   sfx.blip(id);
@@ -229,6 +258,17 @@ view.addEventListener('pointerdown', (e) => {
 view.addEventListener('pointermove', (e) => {
   mousePt = toSim(e);
   if (!painting) return;
+  if (!erasing && element >= CBASE) {
+    // creatures are sown, not painted: one every few cells of drag
+    const d = Math.abs(mousePt.x - lastSpawnPt.x) + Math.abs(mousePt.y - lastSpawnPt.y);
+    if (d >= 7) {
+      world.spawnCreature(element - CBASE, mousePt.x, mousePt.y);
+      lastSpawnPt = mousePt;
+      sfx.blip(E.PLANT);
+    }
+    lastPt = mousePt;
+    return;
+  }
   const id = erasing ? E.EMPTY : element;
   paintLine(lastPt, mousePt, id);
   lastPt = mousePt;
@@ -264,6 +304,7 @@ $('btn-step').addEventListener('click', () => { setPaused(true); world.tick(); }
 $('btn-clear').addEventListener('click', () => {
   snapshot();
   world.cells.fill(E.EMPTY); world.meta.fill(0);
+  world.creatures.length = 0;
 });
 $('btn-new').addEventListener('click', () => newWorld((Math.random() * 0xffffffff) >>> 0));
 $('btn-shot').addEventListener('click', () => {
@@ -296,6 +337,7 @@ for (const btn of document.querySelectorAll('.scenes button')) {
 // --- keyboard ---
 const KEY_TO_ELEMENT = {};
 for (const [id, k] of Object.entries(KEYS)) KEY_TO_ELEMENT[k.toLowerCase()] = +id;
+for (const [id, k] of Object.entries(CKEYS)) KEY_TO_ELEMENT[k.toLowerCase()] = +id;
 
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
@@ -309,7 +351,7 @@ window.addEventListener('keydown', (e) => {
   else if (k === '.') { setPaused(true); world.tick(); }
   else if (k === '[') setBrush(brush - 1);
   else if (k === ']') setBrush(brush + 1);
-  else if (k === 'c') { snapshot(); world.cells.fill(E.EMPTY); world.meta.fill(0); }
+  else if (k === 'c') { snapshot(); world.cells.fill(E.EMPTY); world.meta.fill(0); world.creatures.length = 0; }
   else if (k === 'r') newWorld((Math.random() * 0xffffffff) >>> 0);
   else if (k === 'm') $('btn-mute').click();
   else if (k === 'p') $('btn-shot').click();
@@ -330,7 +372,8 @@ function showToast(msg) {
 function hideToast() { $('toast').classList.remove('show'); }
 
 // --- footer stats ---
-const fScene = $('f-scene'), fTps = $('f-tps'), fFps = $('f-fps'), fCells = $('f-cells'), fAt = $('f-at');
+const fScene = $('f-scene'), fTps = $('f-tps'), fFps = $('f-fps'), fCells = $('f-cells'),
+      fPop = $('f-pop'), fAt = $('f-at');
 function updateFooterStatic() {
   fScene.innerHTML = `<b>${scene}</b> · seed ${seed}`;
 }
@@ -342,6 +385,7 @@ function pollStats() {
   let live = 0;
   for (let i = 1; i < s.length; i++) live += s[i];
   cellCount = live;
+  fPop.innerHTML = `<b>${world.creatures.length}</b> souls`;
   // open flames drive the crackle; buried magma only murmurs
   sfx.setCrackle((s[E.FIRE] + s[E.LAVA] * 0.12) / 420);
 }
@@ -363,6 +407,10 @@ function frame(now) {
     const ev = world.events;
     if (ev.boom) sfx.boom(ev.boomR);
     else if (ev.steam > 2) sfx.hiss(Math.min(1, ev.steam / 30));
+    if (ev.build) sfx.life('build');
+    else if (ev.death) sfx.life('death');
+    else if (ev.birth) sfx.life('birth');
+    else if (ev.chop) sfx.life('chop');
     if (world.tickCount % 30 === 0) pollStats();
   }
 
@@ -418,7 +466,8 @@ newWorld(seed);
 selectElement(E.SAND);
 setBrush(4);
 pollStats();
-showToast(scene === 'volcano' ? 'Paint with your mouse — or go poke the volcano 🌋' : 'Paint with your mouse ✦');
+showToast(scene === 'island' ? 'A village wakes on the islands — watch them work, or play god 🏝'
+  : scene === 'volcano' ? 'Paint with your mouse — or go poke the volcano 🌋' : 'Paint with your mouse ✦');
 requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
 
 })();

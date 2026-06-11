@@ -70,6 +70,58 @@ const DIRS4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
 // Fire checks sides, below, above, and upper diagonals (flames lick upward).
 const FIRE_DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0], [-1, -1], [1, -1]];
 
+// What creatures can stand on.
+const IS_SOLID = new Uint8Array(N);
+[E.WALL, E.STONE, E.SAND, E.WOOD, E.PLANT, E.ICE, E.GUNPOWDER, E.GLASS, E.SPOUT]
+  .forEach(i => IS_SOLID[i] = 1);
+
+// ---------------------------------------------------------------------------
+// Creatures — the WorldBox layer: tiny souls living on top of the alchemy.
+// They are entities, not cells: the grid is their terrain, hazard, and food.
+// ---------------------------------------------------------------------------
+
+const C = Object.freeze({ HUMAN: 0, RABBIT: 1, BIRD: 2, FISH: 3 });
+const CN = 4;
+
+const CREATURES = [
+  { id: C.HUMAN,  name: 'Villager', color: [232, 190, 150], desc: 'Wanders, flees danger, chops trees — and with 10 wood, builds a hut. Villagers near each other raise children.' },
+  { id: C.RABBIT, name: 'Rabbit',   color: [236, 232, 225], desc: 'Hops about and grazes on plants. Two well-fed rabbits make a third rabbit.' },
+  { id: C.BIRD,   name: 'Bird',     color: [120, 140, 200], desc: 'Rides the sky, perches in the trees, and wants nothing to do with your fires.' },
+  { id: C.FISH,   name: 'Fish',     color: [235, 140, 52],  desc: 'Lives in water, dies on land. The sea quietly fills with them.' },
+];
+
+const CREATURE_CAP = [44, 30, 18, 30];        // per-type population ceiling
+const ADULT_AGE    = [1500, 600, 0, 400];     // ticks until grown (and fertile)
+const BREATH       = [600, 360, 70, 260];     // ticks survivable in the wrong medium
+const HUT_WOOD = 10;                          // wood a villager needs to build
+
+// creature states
+const S_WANDER = 0, S_SEEK = 1, S_CHOP = 2, S_BUILD = 3, S_FLEE = 4,
+      S_PERCH = 5, S_BURN = 6;
+
+const SHIRTS = [
+  [202, 74, 74], [74, 122, 212], [224, 178, 70],
+  [110, 190, 96], [168, 96, 198], [216, 130, 70],
+];
+
+// Raise a hut: wood frame, pitched roof, a door on the `dir` side.
+// Hut timbers carry meta bit 1 so villagers never chop their own village.
+function hutAt(w, cx, baseY, dir) {
+  const ok = (x, y) => {
+    const id = w.get(x, y);
+    return id === E.EMPTY || id === E.PLANT || IS_GAS[id] || IS_LIQUID[id];
+  };
+  const put = (x, y) => { if (ok(x, y)) w.set(x, y, E.WOOD, 1); };
+  for (let u = 0; u <= 3; u++) { put(cx - 3, baseY - u); put(cx + 3, baseY - u); } // walls
+  for (let x = cx - 3; x <= cx + 3; x++) put(x, baseY - 4);                        // ceiling
+  for (let x = cx - 2; x <= cx + 2; x++) put(x, baseY - 5);                        // roof
+  for (let x = cx - 1; x <= cx + 1; x++) put(x, baseY - 6);                        // ridge
+  // door: carve the wall open on the facing side
+  const dx = cx + 3 * (dir >= 0 ? 1 : -1);
+  if (w.get(dx, baseY) === E.WOOD)     w.set(dx, baseY, E.EMPTY);
+  if (w.get(dx, baseY - 1) === E.WOOD) w.set(dx, baseY - 1, E.EMPTY);
+}
+
 // ---------------------------------------------------------------------------
 // World
 // ---------------------------------------------------------------------------
@@ -87,14 +139,18 @@ class World {
     this.parity = 1;
     this.tickCount = 0;
     this.rngState = (seed >>> 0) || 1;
-    this.events = { boom: 0, boomR: 0, steam: 0, ignite: 0 };
+    this.creatures = [];
+    this.events = { boom: 0, boomR: 0, steam: 0, ignite: 0, chop: 0, build: 0, birth: 0, death: 0 };
     this._explosions = [];
     for (let i = 0; i < n; i++) this.shade[i] = this.rnd8();
   }
 
   // --- deterministic RNG (mulberry32) ---
   rand() {
-    let t = (this.rngState += 0x6D2B79F5) >>> 0;
+    // keep rngState truncated to u32: a float accumulator silently loses
+    // integer precision past 2^53, which broke snapshot determinism
+    this.rngState = (this.rngState + 0x6D2B79F5) >>> 0;
+    let t = this.rngState;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -153,6 +209,7 @@ class World {
     this.tickCount++;
     const ev = this.events;
     ev.boom = 0; ev.boomR = 0; ev.steam = 0; ev.ignite = 0;
+    ev.chop = 0; ev.build = 0; ev.birth = 0; ev.death = 0;
 
     for (let y = h - 1; y >= 0; y--) {
       const ltr = ((y ^ this.tickCount) & 1) === 0; // alternate scan direction per row
@@ -171,6 +228,7 @@ class World {
       const r = this._explosions.pop(), ey = this._explosions.pop(), ex = this._explosions.pop();
       this._explode(ex, ey, r);
     }
+    this.updateCreatures();
   }
 
   update(x, y, i, id) {
@@ -422,6 +480,416 @@ class World {
     }
   }
 
+  // --- creatures ---
+
+  spawnCreature(type, x, y, age) {
+    let n = 0;
+    for (const c of this.creatures) if (c.type === type && !c.dead) n++;
+    if (n >= CREATURE_CAP[type]) return null;
+    const c = {
+      type,
+      x: Math.max(1, Math.min(this.w - 2, x | 0)),
+      y: Math.max(1, Math.min(this.h - 2, y | 0)),
+      dir: this.chance(0.5) ? 1 : -1,
+      state: S_WANDER, t: 0, tx: -1, ty: -1,
+      res: 0, age: age === undefined ? ADULT_AGE[type] : age,
+      breath: BREATH[type], fall: 0, cool: 0,
+      seed: this.rnd8(), built: 0, dead: 0,
+    };
+    this.creatures.push(c);
+    return c;
+  }
+
+  die(c, cause) {
+    if (c.dead) return;
+    c.dead = 1;
+    this.events.death++;
+    const i = this.idx(c.x, c.y);
+    if (cause === 'fire') {
+      if (this.cells[i] === E.EMPTY) this.setI(i, E.FIRE, 16 + this.rnd(14));
+    } else if (cause === 'acid' || cause === 'fall') {
+      if (this.cells[i] === E.EMPTY) this.setI(i, E.SMOKE, 24 + this.rnd(20));
+    }
+    // drowned and vanished souls leave nothing behind
+  }
+
+  updateCreatures() {
+    const list = this.creatures;
+    if (!list.length) return;
+    for (let k = 0; k < list.length; k++) {
+      const c = list[k];
+      if (c.dead) continue;
+      c.age++;
+      if (c.cool > 0) c.cool--;
+      switch (c.type) {
+        case C.HUMAN:  this.updHuman(c); break;
+        case C.RABBIT: this.updRabbit(c); break;
+        case C.BIRD:   this.updBird(c); break;
+        case C.FISH:   this.updFish(c); break;
+      }
+    }
+    if (this.tickCount % 25 === 0) this.breed();
+    let w = 0;
+    for (let k = 0; k < list.length; k++) if (!list[k].dead) list[w++] = list[k];
+    list.length = w;
+  }
+
+  // shared survival checks: returns true if the creature is gone or burning
+  vitals(c) {
+    const here = this.get(c.x, c.y), head = this.get(c.x, c.y - 1);
+    if (here === E.VOID || head === E.VOID) { this.die(c, 'vanish'); return true; }
+    if (here === E.ACID || head === E.ACID) { this.die(c, 'acid'); return true; }
+    if (here === E.FIRE || here === E.LAVA || head === E.FIRE || head === E.LAVA) {
+      if (c.type === C.FISH) { this.die(c, 'fire'); return true; }
+      if (c.state !== S_BURN) { c.state = S_BURN; c.t = 22 + this.rnd(16); }
+    }
+    if (c.type !== C.FISH) {
+      // drowning: head under liquid (birds can't even wade)
+      if (IS_LIQUID[head] || (c.type === C.BIRD && IS_LIQUID[here])) {
+        if (--c.breath <= 0) { this.die(c, 'drown'); return true; }
+      } else if (!IS_LIQUID[here]) {
+        c.breath = BREATH[c.type];
+      }
+    }
+    if (c.state === S_BURN) {
+      c.t--;
+      if (c.t <= 0) { this.die(c, 'fire'); return true; }
+      if (this.chance(0.15)) c.dir = -c.dir;     // flailing
+      if (this.chance(0.7)) this.tryStep(c, 1);
+      const i = this.idx(c.x, c.y);
+      if (this.cells[i] === E.EMPTY && this.chance(0.1)) this.setI(i, E.FIRE, 8 + this.rnd(10));
+      this.fallAndFloat(c);
+      return true;
+    }
+    return false;
+  }
+
+  // gravity for walkers; in liquid they bob toward the surface instead
+  fallAndFloat(c) {
+    const here = this.get(c.x, c.y);
+    if (IS_LIQUID[here]) {
+      c.fall = 0;
+      if (this.chance(0.45) && !IS_SOLID[this.get(c.x, c.y - 1)]) c.y--;
+      return;
+    }
+    const below = this.get(c.x, c.y + 1);
+    if (!IS_SOLID[below] && !IS_LIQUID[below] && c.y + 1 < this.h - 1) {
+      c.y++;
+      if (c.fall < 250) c.fall++;
+      // terminal velocity: long falls cover 2 cells per tick
+      const b2 = this.get(c.x, c.y + 1);
+      if (c.fall > 4 && !IS_SOLID[b2] && !IS_LIQUID[b2] && c.y + 1 < this.h - 1) c.y++;
+    } else {
+      if (c.fall > 16) { this.die(c, 'fall'); return; }
+      c.fall = 0;
+    }
+  }
+
+  // walk one cell toward c.dir, stepping up to `climb` cells; flips dir if blocked
+  tryStep(c, climb) {
+    const nx = c.x + c.dir;
+    if (nx < 1 || nx >= this.w - 1) { c.dir = -c.dir; return false; }
+    for (let u = 0; u <= climb; u++) {
+      const ny = c.y - u;
+      if (ny < 1) break;
+      if (u > 0 && !IS_SOLID[this.get(nx, c.y - u + 1)]) break; // only climb onto something
+      if (!IS_SOLID[this.get(nx, ny)] && !IS_SOLID[this.get(nx, ny - 1)]) {
+        c.x = nx; c.y = ny;
+        return true;
+      }
+    }
+    c.dir = -c.dir;
+    return false;
+  }
+
+  // nearest open flame / lava / acid in a box around (x, y); -1 if calm
+  scanHazard(x, y, r, alsoSmoke) {
+    for (let dy = -r; dy <= r; dy++) {
+      const yy = y + dy;
+      if (yy < 0 || yy >= this.h) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= this.w) continue;
+        const id = this.cells[yy * this.w + xx];
+        if (id === E.FIRE || id === E.LAVA || id === E.ACID ||
+            (alsoSmoke && id === E.SMOKE)) return xx;
+      }
+    }
+    return -1;
+  }
+
+  // nearest choppable wood (hut timbers carry meta bit 1 and are sacred)
+  findWood(x, y, rx, ry) {
+    let bx = -1, by = -1, best = 1e9;
+    const x0 = Math.max(1, x - rx), x1 = Math.min(this.w - 2, x + rx);
+    const y0 = Math.max(1, y - ry), y1 = Math.min(this.h - 2, y + ry);
+    for (let yy = y0; yy <= y1; yy++) {
+      for (let xx = x0; xx <= x1; xx++) {
+        const i = yy * this.w + xx;
+        if (this.cells[i] !== E.WOOD || (this.meta[i] & 1)) continue;
+        const d = Math.abs(xx - x) * 2 + Math.abs(yy - y);
+        if (d < best) { best = d; bx = xx; by = yy; }
+      }
+    }
+    return bx < 0 ? null : { x: bx, y: by };
+  }
+
+  // is (x, y) standing on a flat, open spot fit for a hut?
+  flatSpot(x, y) {
+    if (x < 6 || x > this.w - 7) return false;
+    for (let dx = -4; dx <= 4; dx++) {
+      const g = this.get(x + dx, y + 1);
+      if (!IS_SOLID[g] || IS_LIQUID[this.get(x + dx, y)]) return false;
+      // headroom for the frame
+      for (let u = 0; u <= 6; u++) {
+        const id = this.get(x + dx, y - u);
+        if (IS_SOLID[id] && id !== E.PLANT) return false;
+      }
+    }
+    // don't build on top of the neighbors
+    for (let dy = -8; dy <= 2; dy++) {
+      for (let dx = -10; dx <= 10; dx++) {
+        const i0 = this.idx(Math.max(0, Math.min(this.w - 1, x + dx)),
+                            Math.max(0, Math.min(this.h - 1, y + dy)));
+        if (this.cells[i0] === E.WOOD && (this.meta[i0] & 1)) return false;
+      }
+    }
+    return true;
+  }
+
+  updHuman(c) {
+    if (this.vitals(c)) return;
+    this.fallAndFloat(c);
+    if (c.dead) return;
+    const tk = this.tickCount + c.seed;
+    // danger close: drop everything and run
+    if (c.state !== S_FLEE && tk % 9 === 0) {
+      const hx = this.scanHazard(c.x, c.y, 8, false);
+      if (hx >= 0) {
+        c.state = S_FLEE; c.t = 50;
+        c.dir = hx > c.x ? -1 : hx < c.x ? 1 : (this.chance(0.5) ? 1 : -1);
+      }
+    }
+    switch (c.state) {
+      case S_FLEE:
+        this.tryStep(c, 2);
+        if (--c.t <= 0) c.state = S_WANDER;
+        break;
+      case S_WANDER: {
+        if (tk % 3 === 0) {
+          // landlubbers: turn back at the waterline (mostly)
+          if (IS_LIQUID[this.get(c.x + c.dir, c.y)] &&
+              IS_LIQUID[this.get(c.x + c.dir, c.y + 1)] && this.chance(0.85)) {
+            c.dir = -c.dir;
+          } else {
+            if (this.chance(0.03)) c.dir = -c.dir;
+            this.tryStep(c, 1);
+          }
+        }
+        const grown = c.age >= ADULT_AGE[C.HUMAN];
+        if (grown && c.res >= HUT_WOOD && c.built === 0) {
+          c.state = S_BUILD; c.t = 700;
+        } else if (grown && c.res < HUT_WOOD && c.built === 0 &&
+                   tk % 121 === 0 && this.chance(0.3)) {
+          const t = this.findWood(c.x, c.y, 70, 26);
+          if (t) { c.tx = t.x; c.ty = t.y; c.state = S_SEEK; c.t = 700; }
+        }
+        break;
+      }
+      case S_SEEK: {
+        if (--c.t <= 0) { c.state = S_WANDER; break; }
+        if (Math.abs(c.x - c.tx) <= 1 && Math.abs(c.y - c.ty) <= 4) { c.state = S_CHOP; break; }
+        if (tk % 31 === 0 && this.get(c.tx, c.ty) !== E.WOOD) { c.state = S_WANDER; break; }
+        if (tk % 2 === 0) {
+          c.dir = c.tx > c.x ? 1 : -1;
+          if (!this.tryStep(c, 2)) c.t = c.t > 10 ? c.t - 10 : 1; // blocked: lose patience
+        }
+        break;
+      }
+      case S_CHOP: {
+        if (tk % 23 !== 0) break;
+        let chopped = false;
+        for (let dy = -4; dy <= 2 && !chopped; dy++) {
+          for (let dx = -2; dx <= 2 && !chopped; dx++) {
+            const xx = c.x + dx, yy = c.y + dy;
+            if (!this.inBounds(xx, yy)) continue;
+            const i = yy * this.w + xx;
+            if (this.cells[i] === E.WOOD && !(this.meta[i] & 1)) {
+              this.setI(i, E.EMPTY);
+              // the trunk settles down a cell, so the whole tree gets worked
+              // from the base instead of stranding timber in the sky
+              for (let y2 = yy - 1; y2 >= 1; y2--) {
+                const j = y2 * this.w + xx;
+                if (this.cells[j] !== E.WOOD || (this.meta[j] & 1)) break;
+                this.moveI(j, j + this.w);
+              }
+              c.res++;
+              this.events.chop++;
+              chopped = true;
+            }
+          }
+        }
+        if (!chopped) { c.state = c.res >= HUT_WOOD ? S_BUILD : S_WANDER; c.t = 700; }
+        else if (c.res >= HUT_WOOD) { c.state = S_BUILD; c.t = 700; }
+        break;
+      }
+      case S_BUILD: {
+        if (--c.t <= 0) { c.state = S_WANDER; break; }
+        if (tk % 12 === 0 && this.flatSpot(c.x, c.y)) {
+          hutAt(this, c.x, c.y, c.dir);
+          c.res -= HUT_WOOD;
+          c.built = 1;
+          c.cool = 0;
+          this.events.build++;
+          c.state = S_WANDER;
+          break;
+        }
+        if (tk % 3 === 0) this.tryStep(c, 1);
+        break;
+      }
+    }
+  }
+
+  updRabbit(c) {
+    if (this.vitals(c)) return;
+    this.fallAndFloat(c);
+    if (c.dead) return;
+    const tk = this.tickCount + c.seed;
+    if (c.state !== S_FLEE && tk % 8 === 0) {
+      const hx = this.scanHazard(c.x, c.y, 7, false);
+      if (hx >= 0) {
+        c.state = S_FLEE; c.t = 36;
+        c.dir = hx > c.x ? -1 : 1;
+      }
+    }
+    if (c.state === S_FLEE) {
+      this.tryStep(c, 2);
+      if (--c.t <= 0) c.state = S_WANDER;
+      return;
+    }
+    if (tk % 2 === 0) {
+      if (this.chance(0.05)) c.dir = -c.dir;
+      if (this.chance(0.8)) this.tryStep(c, 2);
+    }
+    // graze: nibble plants beside, above, or diagonally below — never the
+    // ground directly underfoot, rabbits don't dig their own pitfalls
+    if (tk % 14 === 0 && c.res < 6) {
+      const spots = [[1, 0], [-1, 0], [0, -1], [1, 1], [-1, 1]];
+      for (let s = 0; s < spots.length; s++) {
+        const xx = c.x + spots[s][0], yy = c.y + spots[s][1];
+        if (this.get(xx, yy) === E.PLANT) {
+          this.set(xx, yy, E.EMPTY);
+          c.res++;
+          break;
+        }
+      }
+    }
+  }
+
+  updBird(c) {
+    if (this.vitals(c)) return;
+    if (c.dead) return;
+    const tk = this.tickCount + c.seed;
+    // smoke and flame send birds wheeling away
+    if (tk % 12 === 0) {
+      const hx = this.scanHazard(c.x, c.y, 7, true);
+      if (hx >= 0) {
+        c.state = S_WANDER;
+        c.tx = Math.max(2, Math.min(this.w - 3, c.x + (hx > c.x ? -50 : 50)));
+        c.ty = Math.max(4, c.y - 18);
+        c.t = 90;
+      }
+    }
+    if (c.state === S_PERCH) {
+      if (!IS_SOLID[this.get(c.x, c.y + 1)]) { c.state = S_WANDER; c.tx = -1; }
+      else if (this.chance(0.004)) { c.state = S_WANDER; c.tx = -1; }
+      return;
+    }
+    // pick somewhere to be
+    if (c.tx < 0 || (Math.abs(c.x - c.tx) <= 2 && Math.abs(c.y - c.ty) <= 2)) {
+      c.tx = Math.max(2, Math.min(this.w - 3, c.x + this.rnd(121) - 60));
+      c.ty = Math.max(5, Math.min((this.h * 0.55) | 0, c.y + this.rnd(61) - 34));
+    }
+    const mdx = c.tx > c.x ? 1 : c.tx < c.x ? -1 : 0;
+    const mdy = c.ty > c.y ? 1 : c.ty < c.y ? -1 : 0;
+    if (mdx) c.dir = mdx;
+    if (this.chance(0.8)) {
+      const nx = c.x + mdx;
+      if (!IS_SOLID[this.get(nx, c.y)] && !IS_LIQUID[this.get(nx, c.y)]) c.x = nx;
+      else c.tx = -1;
+    }
+    if (this.chance(0.6)) {
+      const ny = c.y + mdy;
+      if (!IS_SOLID[this.get(c.x, ny)] && !IS_LIQUID[this.get(c.x, ny)]) c.y = ny;
+      else c.tx = -1;
+    }
+    // settle into a tree now and then
+    const below = this.get(c.x, c.y + 1);
+    if ((below === E.PLANT || below === E.WOOD) && this.chance(0.03)) c.state = S_PERCH;
+  }
+
+  updFish(c) {
+    const here = this.get(c.x, c.y);
+    if (here === E.VOID) { this.die(c, 'vanish'); return; }
+    if (here === E.LAVA || here === E.FIRE || here === E.ACID || here === E.OIL) {
+      this.die(c, here === E.ACID ? 'acid' : 'fire'); return;
+    }
+    if (this.scanHazard(c.x, c.y, 2, false) >= 0 && this.tickCount % 2 === 0) {
+      // boiling nearby: dart away
+      c.dir = -c.dir;
+    }
+    if (here === E.WATER) {
+      c.breath = BREATH[C.FISH];
+      const tk = this.tickCount + c.seed;
+      if (tk % 2 !== 0) return;
+      if (this.chance(0.04)) c.dir = -c.dir;
+      const dy = this.chance(0.25) ? (this.chance(0.5) ? 1 : -1) : 0;
+      const nx = c.x + (this.chance(0.85) ? c.dir : 0);
+      if (this.get(nx, c.y + dy) === E.WATER) { c.x = nx; c.y += dy; }
+      else if (this.get(c.x, c.y + dy) === E.WATER) c.y += dy;
+      else c.dir = -c.dir;
+      return;
+    }
+    // a fish out of water: flop, gasp, expire
+    this.fallAndFloat(c);
+    if (c.dead) return;
+    if (this.chance(0.2)) c.x += this.chance(0.5) ? 1 : -1;
+    c.x = Math.max(1, Math.min(this.w - 2, c.x));
+    if (--c.breath <= 0) this.die(c, 'drown');
+  }
+
+  // matchmaking pass: nearby pairs of grown, rested creatures make new ones
+  breed() {
+    const list = this.creatures;
+    const tryType = (type, dist, need, p, cool) => {
+      let n = 0;
+      for (const c of list) if (c.type === type && !c.dead) n++;
+      if (n === 0 || n >= CREATURE_CAP[type]) return;
+      for (let a = 0; a < list.length; a++) {
+        const ca = list[a];
+        if (ca.dead || ca.type !== type || ca.cool > 0 ||
+            ca.age < ADULT_AGE[type] || ca.res < need) continue;
+        for (let b = a + 1; b < list.length; b++) {
+          const cb = list[b];
+          if (cb.dead || cb.type !== type || cb.cool > 0 ||
+              cb.age < ADULT_AGE[type] || cb.res < need) continue;
+          if (Math.abs(ca.x - cb.x) > dist || Math.abs(ca.y - cb.y) > dist) continue;
+          if (!this.chance(p)) continue;
+          const baby = this.spawnCreature(type, (ca.x + cb.x) >> 1, (ca.y + cb.y) >> 1, 0);
+          if (baby) {
+            ca.cool = cool; cb.cool = cool;
+            ca.res -= need; cb.res -= need;
+            this.events.birth++;
+          }
+          return; // one birth per pass per species: villages, not plagues
+        }
+      }
+    };
+    tryType(C.HUMAN, 6, 0, 0.22, 1500);
+    tryType(C.RABBIT, 5, 2, 0.35, 420);
+    tryType(C.FISH, 4, 0, 0.06, 900);
+  }
+
   // --- explosions ---
 
   boomAt(x, y, r) { this._explosions.push(x, y, r); }
@@ -430,6 +898,11 @@ class World {
     const ev = this.events;
     ev.boom++; if (r > ev.boomR) ev.boomR = r;
     const r2 = r * r;
+    for (const c of this.creatures) {
+      if (c.dead) continue;
+      const dx = c.x - cx, dy = c.y - cy;
+      if (dx * dx + dy * dy <= r2 + 2 * r) this.die(c, 'fire');
+    }
     for (let dy = -r; dy <= r; dy++) {
       const yy = cy + dy;
       if (yy < 0 || yy >= this.h) continue;
@@ -476,6 +949,13 @@ class World {
 
   paint(cx, cy, r, id) {
     const r2 = r * r;
+    if (id === E.EMPTY) {
+      // the eraser unmakes creatures too, quietly
+      for (const c of this.creatures) {
+        const dx = c.x - cx, dy = c.y - cy;
+        if (dx * dx + dy * dy <= r2) c.dead = 1;
+      }
+    }
     for (let dy = -r; dy <= r; dy++) {
       const y = cy + dy;
       if (y < 0 || y >= this.h) continue;
@@ -517,7 +997,9 @@ class World {
 
   serialize() {
     const n = this.w * this.h;
-    const buf = new Uint8Array(24 + n * 4);
+    const cs = this.creatures;
+    const CREC = 24;
+    const buf = new Uint8Array(24 + n * 4 + 4 + cs.length * CREC);
     const dv = new DataView(buf.buffer);
     dv.setUint32(0, MAGIC); dv.setUint32(4, this.w); dv.setUint32(8, this.h);
     dv.setUint32(12, this.tickCount); dv.setUint32(16, this.rngState);
@@ -526,6 +1008,18 @@ class World {
     buf.set(this.meta, 24 + n);
     buf.set(this.shade, 24 + n * 2);
     buf.set(this.flags, 24 + n * 3);
+    let o = 24 + n * 4;
+    dv.setUint32(o, cs.length); o += 4;
+    for (const c of cs) {
+      dv.setUint8(o, c.type); dv.setUint8(o + 1, c.dir + 1); dv.setUint8(o + 2, c.state);
+      dv.setUint8(o + 3, c.res); dv.setUint8(o + 4, c.fall); dv.setUint8(o + 5, c.seed);
+      dv.setUint8(o + 6, c.built); dv.setUint8(o + 7, c.dead);
+      dv.setUint16(o + 8, c.x); dv.setUint16(o + 10, c.y);
+      dv.setUint16(o + 12, c.t); dv.setUint16(o + 14, c.tx + 1); dv.setUint16(o + 16, c.ty + 1);
+      dv.setUint16(o + 18, Math.min(65535, c.age));
+      dv.setUint16(o + 20, c.breath); dv.setUint16(o + 22, c.cool);
+      o += CREC;
+    }
     return buf;
   }
 
@@ -541,6 +1035,22 @@ class World {
     this.meta.set(buf.subarray(24 + n, 24 + n * 2));
     this.shade.set(buf.subarray(24 + n * 2, 24 + n * 3));
     this.flags.set(buf.subarray(24 + n * 3, 24 + n * 4));
+    this.creatures = [];
+    let o = 24 + n * 4;
+    if (buf.byteLength >= o + 4) {
+      const count = dv.getUint32(o); o += 4;
+      for (let k = 0; k < count; k++) {
+        this.creatures.push({
+          type: dv.getUint8(o), dir: dv.getUint8(o + 1) - 1, state: dv.getUint8(o + 2),
+          res: dv.getUint8(o + 3), fall: dv.getUint8(o + 4), seed: dv.getUint8(o + 5),
+          built: dv.getUint8(o + 6), dead: dv.getUint8(o + 7),
+          x: dv.getUint16(o + 8), y: dv.getUint16(o + 10),
+          t: dv.getUint16(o + 12), tx: dv.getUint16(o + 14) - 1, ty: dv.getUint16(o + 16) - 1,
+          age: dv.getUint16(o + 18), breath: dv.getUint16(o + 20), cool: dv.getUint16(o + 22),
+        });
+        o += 24;
+      }
+    }
   }
 }
 
@@ -549,6 +1059,11 @@ function hashState(world) {
   const mix = (v) => { h ^= v; h = Math.imul(h, 0x01000193); };
   const c = world.cells, m = world.meta;
   for (let i = 0; i < c.length; i++) { mix(c[i]); mix(m[i]); }
+  mix(world.creatures.length & 255);
+  for (const cr of world.creatures) {
+    mix(cr.type); mix(cr.x & 255); mix(cr.x >>> 8); mix(cr.y & 255); mix(cr.y >>> 8);
+    mix(cr.state); mix(cr.res & 255); mix(cr.age & 255); mix(cr.dir + 1);
+  }
   mix(world.rngState & 255); mix((world.rngState >>> 8) & 255);
   mix((world.rngState >>> 16) & 255); mix((world.rngState >>> 24) & 255);
   return h >>> 0;
@@ -671,6 +1186,71 @@ function render(world, buf, at, glow) {
         const er = clamp8(r * emit), eg = clamp8(g * emit), eb = clamp8(b * emit);
         glow[gi] = (255 << 24) |
           ((eb > cb ? eb : cb) << 16) | ((eg > cg ? eg : cg) << 8) | (er > cr ? er : cr);
+      }
+    }
+  }
+  drawCreatures(world, buf, at);
+}
+
+// Tiny pixel souls, drawn over the cell layer. (x, y) is the feet cell.
+function drawCreatures(world, buf, at) {
+  const { w, h, creatures } = world;
+  const put = (x, y, r, g, b) => {
+    if (x >= 0 && y >= 0 && x < w && y < h) buf[y * w + x] = pack(r, g, b);
+  };
+  for (let k = 0; k < creatures.length; k++) {
+    const c = creatures[k];
+    if (c.dead) continue;
+    const { x, y, dir, seed } = c;
+    const f = ((at >> 2) + seed) & 1; // 2-frame animation
+    if (c.state === S_BURN) {
+      // a soul alight: a flailing pillar of flame
+      const fl = SIN[(at * 9 + seed * 7) & 255] * 30;
+      for (let u = 0; u <= 2; u++) put(x, y - u, 255, 130 + fl, 30);
+      put(x + (f ? dir : -dir), y - 1, 255, 200 + fl * 0.5, 60);
+      continue;
+    }
+    switch (c.type) {
+      case C.HUMAN: {
+        const sh = SHIRTS[seed % 6];
+        const grown = c.age >= ADULT_AGE[C.HUMAN];
+        if (grown) {
+          put(x, y - 4, 52, 38, 28);                 // hair
+          put(x, y - 3, 232, 190, 150);              // face
+          put(x, y - 2, sh[0], sh[1], sh[2]);        // shirt
+          put(x, y - 1, sh[0], sh[1], sh[2]);
+          put(x, y, 38, 32, 40);                     // legs
+          put(x + (f ? dir : -dir), y, 38, 32, 40);  // stride
+          if (c.res > 0) put(x + dir, y - 1, 124, 86, 52); // armful of wood
+        } else {
+          put(x, y - 2, 232, 190, 150);
+          put(x, y - 1, sh[0], sh[1], sh[2]);
+          put(x, y, 38, 32, 40);
+        }
+        break;
+      }
+      case C.RABBIT: {
+        const fur = (seed & 1) ? [238, 234, 226] : [168, 124, 86];
+        put(x - dir, y, fur[0] - 30, fur[1] - 30, fur[2] - 24);  // haunches
+        put(x, y, fur[0], fur[1], fur[2]);                       // body
+        put(x + dir, y, fur[0], fur[1], fur[2]);                 // head
+        put(x + dir, y - 1, fur[0] - 16, fur[1] - 16, fur[2] - 12); // ear
+        break;
+      }
+      case C.BIRD: {
+        const bd = (seed & 1) ? [56, 62, 84] : [134, 46, 52];
+        put(x, y, bd[0], bd[1], bd[2]);                          // body
+        put(x + dir, y, 230, 170, 60);                           // beak
+        const flying = c.state !== S_PERCH;
+        put(x - dir, flying && f ? y - 1 : y, bd[0] + 24, bd[1] + 24, bd[2] + 24); // wing
+        break;
+      }
+      case C.FISH: {
+        const sc = (seed & 1) ? [235, 140, 52] : [176, 196, 212];
+        put(x, y, sc[0], sc[1], sc[2]);                          // head
+        put(x - dir, y, sc[0] - 36, sc[1] - 36, sc[2] - 30);     // body
+        if (f) put(x - dir * 2, y, sc[0] - 60, sc[1] - 56, sc[2] - 44); // tail flick
+        break;
       }
     }
   }
@@ -860,6 +1440,145 @@ function genVolcano(w) {
   // first breath: smoke over the crater, flickers on the lava
   for (let s = 0; s < 8; s++) w.set(cx - 4 + w.rnd(9), peakY - 2 - w.rnd(6), E.SMOKE, 60 + w.rnd(60));
   for (let s = 0; s < 3; s++) w.set(cx - 3 + w.rnd(7), peakY + 3, E.FIRE, 30 + w.rnd(30));
+
+  // the island is inhabited: cabin folk, scrub rabbits, birds, and the sea's fish
+  if (cabinX > 0) {
+    for (let k = 0; k < 3; k++) w.spawnCreature(C.HUMAN, cabinX + 11 + k * 3, ground[cabinX] - 1);
+  }
+  seedWildlife(w, ground, sea, { rabbits: 3, birds: 3, fish: 5 });
+}
+
+// scatter animals across any side-view scene with a ground line and a sea
+function seedWildlife(w, ground, sea, want) {
+  const W = w.w, H = w.h;
+  let rabbits = 0;
+  for (let t = 0; t < 120 && rabbits < want.rabbits; t++) {
+    const x = 8 + w.rnd(W - 16);
+    if (ground[x] < sea - 8) { w.spawnCreature(C.RABBIT, x, ground[x] - 1); rabbits++; }
+  }
+  for (let k = 0; k < want.birds; k++) {
+    w.spawnCreature(C.BIRD, 10 + w.rnd(W - 20), 14 + w.rnd((H * 0.25) | 0));
+  }
+  let fish = 0;
+  for (let t = 0; t < 160 && fish < want.fish; t++) {
+    const x = 4 + w.rnd(W - 8);
+    const y = sea + 4 + w.rnd(((H - sea) * 0.5) | 0);
+    if (w.get(x, y) === E.WATER) { w.spawnCreature(C.FISH, x, y); fish++; }
+  }
+}
+
+function genIsland(w) {
+  const W = w.w, H = w.h;
+  const sea = Math.round(H * 0.66);
+  const n1 = noise1D(w, W, 56, 4);
+  const n2 = noise1D(w, W, 20, 3);
+  const ground = new Int16Array(W);
+
+  // an archipelago: three islands of different temperament
+  // (heights are measured from the seabed, so they must out-climb the sea)
+  const isles = [
+    { cx: W * 0.16, rw: W * 0.085, hgt: H * 0.29 },
+    { cx: W * 0.50, rw: W * 0.130, hgt: H * 0.38 },
+    { cx: W * 0.84, rw: W * 0.080, hgt: H * 0.26 },
+  ];
+  for (let x = 0; x < W; x++) {
+    const seabed = H * 0.86 + n2[x] * 9;
+    let lift = 0;
+    for (const I of isles) {
+      const d = (x - I.cx) / I.rw;
+      const b = Math.exp(-d * d) * I.hgt;
+      if (b > lift) lift = b;
+    }
+    let gy = Math.round(seabed - lift - n1[x] * 14 * Math.min(1, lift / 18) - n2[x] * 5);
+    gy = Math.max(18, Math.min(H - 4, gy));
+    ground[x] = gy;
+    for (let y = gy; y < H; y++) {
+      let id = E.STONE;
+      const depth = y - gy;
+      if (gy > sea - 7) { if (depth < 3) id = E.SAND; }   // beaches and seafloor
+      else if (depth < 2) id = E.PLANT;                   // a skin of grass on dry land
+      w.set(x, y, id);
+    }
+  }
+  // ocean
+  for (let x = 0; x < W; x++) {
+    for (let y = sea; y < ground[x]; y++) w.set(x, y, E.WATER);
+  }
+
+  // forests
+  const treeXs = [];
+  for (let t = 0; t < 2000 && treeXs.length < 14; t++) {
+    const x = 6 + w.rnd(W - 12);
+    const gA = ground[x], gB = ground[x + 1];
+    const gy = Math.min(gA, gB);
+    if (gy < sea - 10 && Math.abs(gA - gB) < 4 &&
+        treeXs.every(tx => Math.abs(tx - x) > 9)) {
+      treeXs.push(x);
+      const th = 7 + w.rnd(7);
+      fillRect(w, x, gy - th, x + 1, Math.max(gA, gB) - 1, E.WOOD);
+      fillEllipse(w, x, gy - th - 2, 4 + w.rnd(2), 3 + w.rnd(2), E.PLANT);
+      fillEllipse(w, x + 3 - w.rnd(7), gy - th + 1, 3, 2, E.PLANT);
+    }
+  }
+
+  // a founding village on the great island: two huts on terraced ground
+  const vcx = Math.round(isles[1].cx);
+  const hutXs = [];
+  let huts = 0;
+  for (let off = 8; off < W * 0.22 && huts < 2; off += 3) {
+    for (const s of [-1, 1]) {
+      if (huts >= 2) break;
+      const x = vcx + s * off;
+      if (x < 10 || x > W - 11) continue;
+      if (ground[x] >= sea - 10) continue;
+      if (!treeXs.every(tx => Math.abs(tx - x) > 8)) continue;
+      if (!hutXs.every(hx => Math.abs(hx - x) > 14)) continue;
+      const K = ground[x];
+      for (let xx = x - 5; xx <= x + 5; xx++) {  // terrace
+        for (let y = Math.min(K, ground[xx]); y < Math.max(K, ground[xx]); y++) {
+          w.set(xx, y, y >= K ? E.STONE : E.EMPTY);
+        }
+        for (let y = K; y < K + 3; y++) w.set(xx, y, E.STONE);
+        ground[xx] = K;
+      }
+      hutAt(w, x, K - 1, s);
+      hutXs.push(x);
+      huts++;
+    }
+  }
+  // the villagers themselves; most are settled folk, two still dream of huts
+  let souls = 0;
+  for (let t = 0; t < 200 && souls < 6; t++) {
+    const x = vcx + w.rnd(81) - 40;
+    if (x > 4 && x < W - 5 && ground[x] < sea - 8) {
+      const v = w.spawnCreature(C.HUMAN, x, ground[x] - 1);
+      if (v && souls >= 2) v.built = 1;
+      souls++;
+    }
+  }
+
+  // a freshwater spring on the great island's shoulder
+  {
+    const sx = vcx - Math.round(isles[1].rw * 0.55);
+    if (ground[sx] < sea - 14) w.set(sx, ground[sx] - 3, E.SPOUT);
+  }
+
+  // buried temptations: oil under the west island, powder under the east
+  fillEllipse(w, Math.round(isles[0].cx), Math.round(H * 0.93), 12, 4, E.OIL);
+  {
+    let vx = Math.round(isles[2].cx) - 12, vy = Math.round(H * 0.91);
+    for (let s = 0; s < 20; s++) {
+      fillEllipse(w, vx, vy, 2, 2, E.GUNPOWDER);
+      vx += 1 + w.rnd(2); vy += w.rnd(3) - 1;
+      vy = Math.max(Math.round(H * 0.88), Math.min(H - 4, vy));
+    }
+  }
+
+  // drifting ice at the world's edges
+  fillEllipse(w, Math.round(W * 0.05), sea - 1, 6, 3, E.ICE);
+  fillEllipse(w, Math.round(W * 0.96), sea, 5, 3, E.ICE);
+
+  seedWildlife(w, ground, sea, { rabbits: 6, birds: 5, fish: 10 });
 }
 
 function genSprings(w) {
@@ -907,12 +1626,22 @@ function genSprings(w) {
   // a resident ice block, slowly weeping
   fillEllipse(w, Math.round(W * 0.82), Math.round(H * 0.25), 5, 4, E.ICE);
   fillRect(w, Math.round(W * 0.78), Math.round(H * 0.25) + 5, Math.round(W * 0.86), Math.round(H * 0.25) + 6, E.STONE);
+
+  // fish in the basins, birds in the rafters
+  for (const b of basins) {
+    const x = (b.x0 + b.x1) >> 1;
+    if (w.get(x, b.y - 2) === E.WATER) w.spawnCreature(C.FISH, x, b.y - 2);
+  }
+  w.spawnCreature(C.BIRD, Math.round(W * 0.3), Math.round(H * 0.14));
+  w.spawnCreature(C.BIRD, Math.round(W * 0.7), Math.round(H * 0.2));
 }
 
 function generateScene(world, name) {
   clearWorld(world);
+  world.creatures.length = 0;
   if (name === 'volcano') genVolcano(world);
   else if (name === 'springs') genSprings(world);
+  else if (name === 'island') genIsland(world);
   // 'blank' stays empty
 }
 
@@ -921,7 +1650,8 @@ function generateScene(world, name) {
 const api = {
   E, N, ELEMENTS, World, generateScene, render, hashState, GLOW_SHIFT,
   IS_LIQUID, IS_GAS, IS_POWDER, IS_STATIC,
-  VERSION: '1.0.0',
+  C, CN, CREATURES, CREATURE_CAP, HUT_WOOD,
+  VERSION: '2.0.0',
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 global.PixelAlchemy = api;
