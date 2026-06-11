@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Alchemy — a tiny world in a sandbox</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='9' width='14' height='6' fill='%23d8b863'/><rect x='5' y='5' width='6' height='4' fill='%23f55a18'/><rect x='6' y='2' width='4' height='3' fill='%23ffa028'/></svg>">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <h1>⚗ PIXEL ALCHEMY</h1>
+    <span>a tiny world in a sandbox</span>
+  </div>
+  <nav class="scenes">
+    <button data-scene="volcano" class="on">Volcano</button>
+    <button data-scene="springs">Springs</button>
+    <button data-scene="blank">Blank</button>
+  </nav>
+  <div class="actions">
+    <button id="btn-pause" title="Pause / resume — Space">⏸</button>
+    <button id="btn-step" title="Step one tick — .">⏭</button>
+    <button id="btn-new" title="New world, fresh seed — R">🎲</button>
+    <button id="btn-clear" title="Clear everything — C">🧹</button>
+    <button id="btn-shot" title="Save a PNG — P">📸</button>
+    <button id="btn-mute" title="Sound on/off — M">🔊</button>
+    <button id="btn-help" title="Help — H">?</button>
+  </div>
+</header>
+
+<main>
+  <div class="stage">
+    <canvas id="view"></canvas>
+    <div id="toast"></div>
+    <div id="paused-pill">⏸ PAUSED</div>
+  </div>
+
+  <aside>
+    <h2>Elements</h2>
+    <div class="palette" id="palette"></div>
+    <div id="info"></div>
+    <div class="brush-row">
+      <label for="brush">Brush</label>
+      <input type="range" id="brush" min="1" max="24" value="4">
+      <output id="brush-out">4</output>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span class="stat" id="f-scene"></span>
+  <span class="stat" id="f-tps"></span>
+  <span class="stat" id="f-fps"></span>
+  <span class="stat" id="f-cells"></span>
+  <span class="stat" id="f-at"></span>
+  <span class="credit">no dependencies · no build · engine, tests &amp; screenshots rendered headlessly — built by <em>Claude (Fable 5)</em></span>
+</footer>
+
+<div id="help">
+  <div class="card">
+    <button class="close" id="help-close">✕</button>
+    <h3>FIELD GUIDE</h3>
+
+    <h4>Controls</h4>
+    <div class="grid">
+      <kbd>left drag</kbd><span>paint the selected element</span>
+      <kbd>right drag</kbd><span>erase</span>
+      <kbd>wheel · [ ]</kbd><span>brush size</span>
+      <kbd>1–0, Q W G O V E</kbd><span>quick-select elements</span>
+      <kbd>Space</kbd><span>pause / resume</span>
+      <kbd>.</kbd><span>step one tick while paused</span>
+      <kbd>R</kbd><span>regenerate the scene with a fresh seed</span>
+      <kbd>C</kbd><span>clear the world</span>
+      <kbd>Ctrl+Z / Ctrl+Y</kbd><span>undo / redo strokes</span>
+      <kbd>P</kbd><span>save a PNG of the current view</span>
+      <kbd>M</kbd><span>sound on / off</span>
+    </div>
+
+    <h4>A few recipes</h4>
+    <ul>
+      <li>Water + lava forges stone — pour the sea into the crater and build land.</li>
+      <li>Lava kisses sand into glass. Explosions shatter it right back.</li>
+      <li>Fire loves oil, wood, and plants. Gunpowder loves fire <i>enthusiastically</i>.</li>
+      <li>Steam rises, cools, and rains back down. A whole water cycle.</li>
+      <li>Plants drink water to grow. Ice creeps across still ponds.</li>
+      <li>Acid eats nearly everything — but never glass, and never wall.</li>
+      <li>Spouts pour forever; the void devours forever. Plumbing awaits.</li>
+    </ul>
+
+    <h4>Secrets</h4>
+    <ul>
+      <li>The island keeps things buried. Dig around the seabed with the eraser.</li>
+      <li>The volcano is stable… until someone cracks the crater rim.</li>
+      <li>Every world is procedural — press <kbd>R</kbd> for a new island, forever.</li>
+    </ul>
+  </div>
+</div>
+
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
